@@ -76,6 +76,39 @@
 0:Basic current shell list with error
 >false
 
+  fn() { : && ! ; : }
+  functions -x3 fn
+  fn
+0:End of sublist containing ! with no command
+>fn () {
+>   : && !
+>   :
+>}
+
+  if [[ m -eq y ]]; then
+    : && !
+    :
+  fi
+0:! followed by no further commands
+
+  fn() { ! {!} && ! (!) || ! {!} }
+  functions -x2 fn
+  fn
+0:exclamation marks without following commands
+>fn () {
+>  ! {
+>    !
+>  } && ! (
+>    !
+>  ) || ! {
+>    !
+>  }
+>}
+
+  ! | true
+1:! followed by no command but by a pipe
+?(eval):1: parse error near `|'
+
 #
 # Tests for `Precommand Modifiers'
 #
@@ -433,14 +466,6 @@
 >Status after always block is 1.
 ?(eval):3: bad substitution
 
-  fn() { { return } always { echo always 1 }; echo not executed }
-  fn
-  fn() { { echo try 2 } always { return }; echo not executed }
-  fn
-0:Always block interaction with return
->always 1
->try 2
-
 # Outputting of structures from the wordcode is distinctly non-trivial,
 # we probably ought to have more like the following...
   fn1() { { echo foo; } }
@@ -531,6 +556,13 @@
 >Hip hip hooray
 >Hip hip hooray
 >Hip hip hooray
+
+  repeat 2*2 print yeah
+0:Tokens in repeat argument
+>yeah
+>yeah
+>yeah
+>yeah
 
   case bravo {
     (alpha) print schmalpha
@@ -640,6 +672,16 @@
 >1
 >0
 
+  echo 'echo dot
+  until return 42; do
+    :
+  done' >until_dot
+  . ./until_dot
+  echo After dot
+0:return in positive until test in dot file does not cause excess breaks
+>dot
+>After dot
+
   echo 'echo $?' >dot_status
   false
   . ./dot_status
@@ -677,6 +719,14 @@
 >read it
 >read it
 
+  fn() { { return } always { echo always 1 }; echo not executed }
+  fn
+  fn() { { echo try 2 } always { return }; echo not executed }
+  fn
+0:Always block interaction with return
+>always 1
+>try 2
+
   (
   mywrap() { echo BEGIN; true; echo END }
   mytest() { { exit 3 } always { mywrap }; print Exited before this }
@@ -686,6 +736,7 @@
 3:Exit and always block with functions: simple
 >BEGIN
 >END
+F:Note that the behaviour of 'exit' inside try-list inside a function is unspecified.
 
   (
   mytrue() { echo mytrue; return 0 }
@@ -698,6 +749,7 @@
 >BEGIN
 >mytrue
 >END
+F:Note that the behaviour of 'exit' inside try-list inside a function is unspecified.
 
   (emulate sh -c '
    fn() {
@@ -870,7 +922,7 @@
   x=1
   x=2 | echo $x
   echo $x
-0:Assignment-only current shell commands in LHS of pipelin
+0:Assignment-only current shell commands in LHS of pipeline
 >1
 >1
 
@@ -883,3 +935,38 @@
 >PIPE
 >and true
 >or false
+
+ $ZTST_testdir/../Src/zsh -fc '{ ( ) } always { echo foo }'
+0:exec last command optimization inhibited for try/always
+>foo
+
+ a='${'
+ if : ${(e)a}; then echo x; fi
+1:Status on bad substitution in if without else
+?(eval):2: bad substitution
+
+ echo 'echo foo # comment
+  echo $(
+  echo bar # comment
+ )' >source_comments.zsh
+ $ZTST_testdir/../Src/zsh -f -o extendedglob -is -c '. ./source_comments.zsh'
+0:Comments should be handled in command subst in interactively sourced files
+>foo
+>bar
+
+ function 'ls,/' () {echo success}
+ {ls,/}
+0:workers/47599: current-shell blocks masquerading as brace expansion
+>success
+F:This test was written to ensure the behaviour doesn't change silently.
+F:If this test fails during development, it *might* be appropriate to change
+F:its expectations.
+
+ (
+   export VALUE=first
+   print -l 'echo Value is $VALUE' 'VALUE=second sh' 'echo Value is $VALUE' |
+   $ZTST_testdir/../Src/zsh -f
+ )
+0:Non-interactive shell command input is line buffered
+>Value is first
+>Value is second

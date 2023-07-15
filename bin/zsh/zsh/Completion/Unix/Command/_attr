@@ -23,6 +23,7 @@ case $service in
       '(-e --encoding)'{-e+,--encoding=}'[encode values after retrieving them]:encoding:(text hex base64)' \
       '(-h --no-dereference)'{-h,--no-dereference}"[don't follow symbolic links]" \
       '(-m --match)'{-m+,--match=}'[only include attributes with names matching regex]:regular expression' \
+      '--one-file-system[skip files on different filesystems]' \
       "--absolute-names[don't strip leading slash characters]" \
       '--only-values[dump only attribute values]' \
       '(-R --recursive)'{-R,--recursive}'[list attributes of all files and directories recursively]' \
@@ -56,7 +57,7 @@ case $service in
       '-r[act recursively]' \
       '-s[act on symbolic links]' \
       '(-w)-v[always display file name]' \
-      '(-c -d)-x[use hexademical format for value input and output]' \
+      '(-c -d)-x[use hexadecimal format for value input and output]' \
       '*: :_files' \
       + '(op)' \
       '(-l -x)-c[remove all attributes]' \

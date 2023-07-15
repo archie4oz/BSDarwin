@@ -36,6 +36,10 @@
 
 #include "version.h"
 
+#ifdef __APPLE__
+#include <System/sys/codesign.h>
+#endif /* __APPLE__
+
 /**/
 int noexitct = 0;
 
@@ -45,7 +49,10 @@ int noexitct = 0;
 char *zunderscore;
 
 /**/
-int underscorelen, underscoreused;
+size_t underscorelen;
+
+/**/
+int underscoreused;
 
 /* what level of sourcing we are at */
  
@@ -134,7 +141,7 @@ loop(int toplevel, int justonce)
 		else
 		    stophist = hstop;
 		/*
-		 * Reset all errors, including user interupts.
+		 * Reset all errors, including user interrupts.
 		 * This is what allows ^C in an interactive shell
 		 * to return us to the command line.
 		 */
@@ -158,7 +165,7 @@ loop(int toplevel, int justonce)
 		 * Handle that now.
 		 */
 		stopmsg = 1;
-		zexit(exit_val, 0);
+		zexit(exit_val, ZEXIT_NORMAL);
 	    }
 	    if (tok == LEXERR && !lastval)
 		lastval = 1;
@@ -200,7 +207,7 @@ loop(int toplevel, int justonce)
 		 * that would be inconsistent with the case where
 		 * we didn't execute a preexec function.  This is
 		 * an implementation detail that an interrupting user
-		 * does't care about.
+		 * doesn't care about.
 		 */
 		errflag &= ~ERRFLAG_ERROR;
 	    }
@@ -245,7 +252,8 @@ static int restricted;
 
 /**/
 static void
-parseargs(char *zsh_name, char **argv, char **runscript, char **cmdptr)
+parseargs(char *zsh_name, char **argv, char **runscript, char **cmdptr,
+	  int *needkeymap)
 {
     char **x;
     LinkList paramlist;
@@ -262,7 +270,7 @@ parseargs(char *zsh_name, char **argv, char **runscript, char **cmdptr)
      * matched by code at the end of the present function.
      */
 
-    if (parseopts(zsh_name, &argv, opts, cmdptr, NULL, flags))
+    if (parseopts(zsh_name, &argv, opts, cmdptr, NULL, flags, needkeymap))
 	exit(1);
 
     /*
@@ -359,7 +367,7 @@ static void parseopts_setemulate(char *nam, int flags)
  * Parse shell options.
  *
  * If (flags & PARSEARGS_TOPLEVEL):
- * - we are doing shell initilisation
+ * - we are doing shell initialisation
  * - nam is the name under which the shell was started
  * - set up emulation and standard options based on that.
  * Otherwise:
@@ -373,7 +381,7 @@ static void parseopts_setemulate(char *nam, int flags)
 /**/
 mod_export int
 parseopts(char *nam, char ***argvp, char *new_opts, char **cmdp,
-	  LinkList optlist, int flags)
+	  LinkList optlist, int flags, int *needkeymap)
 {
     int optionbreak = 0;
     int action, optno;
@@ -479,8 +487,14 @@ parseopts(char *nam, char ***argvp, char *new_opts, char **cmdp,
 		    return 1;
 		} else if (optno == RESTRICTED && toplevel) {
 		    restricted = action;
-		} else if ((optno == EMACSMODE || optno == VIMODE) && !toplevel) {
-		    WARN_OPTION("can't change option: %s", *argv);
+		} else if ((optno == EMACSMODE || optno == VIMODE)
+			   && (!toplevel || needkeymap)){
+		    if (!toplevel) {
+			WARN_OPTION("can't change option: %s", *argv);
+		    } else {
+			/* Need to wait for modules to be loadable */
+			*needkeymap = optno;
+		    }
 		} else {
 		    if (dosetopt(optno, action, toplevel, new_opts) &&
 			!toplevel) {
@@ -879,7 +893,7 @@ setupvals(char *cmd, char *runscript, char *zsh_name)
     char *ptr;
     int i, j;
 #if defined(SITEFPATH_DIR) || defined(FPATH_DIR) || defined (ADDITIONAL_FPATH) || defined(FIXED_FPATH_DIR)
-#define FPATH_NEEDS_INIT 1
+# define FPATH_NEEDS_INIT 1
     char **fpathptr;
 # if defined(FPATH_DIR) && defined(FPATH_SUBDIRS)
     char *fpath_subdirs[] = FPATH_SUBDIRS;
@@ -991,18 +1005,29 @@ setupvals(char *cmd, char *runscript, char *zsh_name)
 # endif /* ADDITONAL_FPATH */
     fpath = fpathptr = (char **)zalloc((fpathlen+1)*sizeof(char *));
 # ifdef FIXED_FPATH_DIR
+    /* Zeroth: /usr/local/share/zsh/site-functions */
     *fpathptr++ = ztrdup(FIXED_FPATH_DIR);
     fpathlen--;
 # endif
 # ifdef SITEFPATH_DIR
+    /* First: the directory from --enable-site-fndir
+     *
+     * default: /usr/local/share/zsh/site-functions
+     * (but changeable by passing --prefix or --datadir to configure) */
     *fpathptr++ = ztrdup(SITEFPATH_DIR);
     fpathlen--;
 # endif /* SITEFPATH_DIR */
 # if defined(ADDITIONAL_FPATH)
+    /* Second: the directories from --enable-additional-fpath
+     * 
+     * default: empty list */
     for (j = 0; j < more_fndirs_len; j++)
 	*fpathptr++ = ztrdup(more_fndirs[j]);
 # endif
 # ifdef FPATH_DIR
+    /* Third: The directory from --enable-fndir
+     *
+     * default: /usr/local/share/zsh/${ZSH_VERSION}/functions */
 #  ifdef FPATH_SUBDIRS
 #   ifdef ADDITIONAL_FPATH
     for (j = more_fndirs_len; j < fpathlen; j++)
@@ -1010,7 +1035,7 @@ setupvals(char *cmd, char *runscript, char *zsh_name)
 #   else
     for (j = 0; j < fpathlen; j++)
 	*fpathptr++ = tricat(FPATH_DIR, "/", fpath_subdirs[j]);
-#endif
+#   endif
 #  else
     *fpathptr++ = ztrdup(FPATH_DIR);
 #  endif
@@ -1021,7 +1046,6 @@ setupvals(char *cmd, char *runscript, char *zsh_name)
 #endif /* FPATH_NEEDS_INIT */
 
     mailpath = mkarray(NULL);
-    watch    = mkarray(NULL);
     psvar    = mkarray(NULL);
     module_path = mkarray(ztrdup(MODULE_DIR));
     modulestab = newmoduletable(17, "modules");
@@ -1208,7 +1232,7 @@ setupshin(char *runscript)
     /*
      * Finish setting up SHIN and its relatives.
      */
-    bshin = SHIN ? fdopen(SHIN, "r") : stdin;
+    shinbufalloc();
     if (isset(SHINSTDIN) && !SHIN && unset(INTERACTIVE)) {
 #ifdef _IONBF
 	setvbuf(stdin, NULL, _IONBF, 0);
@@ -1233,6 +1257,15 @@ init_signals(void)
     sigchld_mask = signal_mask(SIGCHLD);
 
     intr();
+
+#ifdef POSIX_SIGNALS
+    {
+	struct sigaction act;
+	if (!sigaction(SIGQUIT, NULL, &act) &&
+	    act.sa_handler == SIG_IGN)
+	    sigtrapped[SIGQUIT] = ZSIG_IGNORED;
+    }
+#endif
 
 #ifndef QDEBUG
     signal_ignore(SIGQUIT);
@@ -1292,9 +1325,26 @@ run_init_scripts(void)
 	} else
 	    source("/etc/suid_profile");
     } else {
+int restrict_source = 0;
+#ifdef __APPLE__
+	uint32_t flags = 0;
+	if (!csops(getpid(), CS_OPS_STATUS, &flags, sizeof(flags))) {
+		if (flags & CS_INSTALLER) {
+			restrict_source = 1;
+			fprintf(xtrerr ? xtrerr : stderr,
+					"Refusing to load unsafe zshenv.\n");
+		}
+	} else {
+		fprintf(xtrerr ? xtrerr : stderr,
+				"Failed to fetch code signing information when loading "
+				"zshenv.\n");
+	}
+#endif /* __APPLE__ */
 #ifdef GLOBAL_ZSHENV
-	source(GLOBAL_ZSHENV);
-#endif
+	if (!restrict_source) {
+		source(GLOBAL_ZSHENV);
+	}
+#endif /* GLOBAL_ZSHENV */
 
 	if (isset(RCS) && unset(PRIVILEGED))
 	{
@@ -1309,7 +1359,9 @@ run_init_scripts(void)
 		}
 	    }
 
-	    sourcehome(".zshenv");
+		if (!restrict_source) {
+			sourcehome(".zshenv");
+		}
 	}
 	if (islogin) {
 #ifdef GLOBAL_ZPROFILE
@@ -1354,12 +1406,12 @@ init_misc(char *cmd, char *zsh_name)
 	dosetopt(RESTRICTED, 1, 0, opts);
     if (cmd) {
 	if (SHIN >= 10)
-	    fclose(bshin);
+	    close(SHIN);
 	SHIN = movefd(open("/dev/null", O_RDONLY | O_NOCTTY));
-	bshin = fdopen(SHIN, "r");
+	shinbufreset();
 	execstring(cmd, 0, 1, "cmdarg");
 	stopmsg = 1;
-	zexit((exit_pending || shell_exiting) ? exit_val : lastval, 0);
+	zexit((exit_pending || shell_exiting) ? exit_val : lastval, ZEXIT_NORMAL);
     }
 
     if (interact && isset(RCS))
@@ -1379,7 +1431,6 @@ source(char *s)
     int tempfd = -1, fd, cj;
     zlong oldlineno;
     int oldshst, osubsh, oloops;
-    FILE *obshin;
     char *old_scriptname = scriptname, *us;
     char *old_scriptfilename = scriptfilename;
     unsigned char *ocs;
@@ -1396,7 +1447,6 @@ source(char *s)
 
     /* save the current shell state */
     fd        = SHIN;            /* store the shell input fd                  */
-    obshin    = bshin;          /* store file handle for buffered shell input */
     osubsh    = subsh;           /* store whether we are in a subshell        */
     cj        = thisjob;         /* store our current job number              */
     oldlineno = lineno;          /* store our current lineno                  */
@@ -1409,7 +1459,7 @@ source(char *s)
 
     if (!prog) {
 	SHIN = tempfd;
-	bshin = fdopen(SHIN, "r");
+	shinbufsave();
     }
     subsh  = 0;
     lineno = 1;
@@ -1477,10 +1527,10 @@ source(char *s)
     if (prog)
 	freeeprog(prog);
     else {
-	fclose(bshin);
+	close(SHIN);
 	fdtable[SHIN] = FDT_UNUSED;
 	SHIN = fd;		     /* the shell input fd                   */
-	bshin = obshin;		     /* file handle for buffered shell input */
+	shinbufrestore();
     }
     subsh = osubsh;                  /* whether we are in a subshell         */
     thisjob = cj;                    /* current job number                   */
@@ -1684,7 +1734,7 @@ zsh_main(int argc, char **argv)
 {
     char **t, *runscript = NULL, *zsh_name;
     char *cmd;			/* argument to -c */
-    int t0;
+    int t0, needkeymap = 0;
 #ifdef USE_LOCALE
     setlocale(LC_ALL, "");
 #endif
@@ -1736,7 +1786,7 @@ zsh_main(int argc, char **argv)
     createoptiontable();
     /* sets emulation, LOGINSHELL, PRIVILEGED, ZLE, INTERACTIVE,
      * SHINSTDIN and SINGLECOMMAND */ 
-    parseargs(zsh_name, argv, &runscript, &cmd);
+    parseargs(zsh_name, argv, &runscript, &cmd, &needkeymap);
 
     SHTTY = -1;
     init_io(cmd);
@@ -1745,6 +1795,15 @@ zsh_main(int argc, char **argv)
     init_signals();
     init_bltinmods();
     init_builtins();
+
+    if (needkeymap)
+    {
+	/* Saved for after module system initialisation */
+	zleentry(ZLE_CMD_SET_KEYMAP, needkeymap);
+	opts[needkeymap] = 1;
+	opts[needkeymap == EMACSMODE ? VIMODE : EMACSMODE] = 0;
+    }
+
     run_init_scripts();
     setupshin(runscript);
     init_misc(cmd, zsh_name);
@@ -1772,20 +1831,20 @@ zsh_main(int argc, char **argv)
 	    if (!lastval)
 		lastval = 1;
 	    stopmsg = 1;
-	    zexit(lastval, 0);
+	    zexit(lastval, ZEXIT_NORMAL);
 	}
 	if (!(isset(IGNOREEOF) && interact)) {
 #if 0
 	    if (interact)
 		fputs(islogin ? "logout\n" : "exit\n", shout);
 #endif
-	    zexit(lastval, 0);
+	    zexit(lastval, ZEXIT_NORMAL);
 	    continue;
 	}
 	noexitct++;
 	if (noexitct >= 10) {
 	    stopmsg = 1;
-	    zexit(lastval, 0);
+	    zexit(lastval, ZEXIT_NORMAL);
 	}
 	/*
 	 * Don't print the message if it was already handled by

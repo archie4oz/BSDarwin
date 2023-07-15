@@ -105,14 +105,17 @@ static struct optname optns[] = {
 {{NULL, "bsdecho",	      OPT_EMULATE|OPT_SH},	 BSDECHO},
 {{NULL, "caseglob",	      OPT_ALL},			 CASEGLOB},
 {{NULL, "casematch",	      OPT_ALL},			 CASEMATCH},
+{{NULL, "casepaths",	      0},			 CASEPATHS},
 {{NULL, "cbases",	      0},			 CBASES},
 {{NULL, "cprecedences",	      OPT_EMULATE|OPT_NONZSH},	 CPRECEDENCES},
 {{NULL, "cdablevars",	      OPT_EMULATE},		 CDABLEVARS},
+{{NULL, "cdsilent",	      0},			 CDSILENT},
 {{NULL, "chasedots",	      OPT_EMULATE},		 CHASEDOTS},
 {{NULL, "chaselinks",	      OPT_EMULATE},		 CHASELINKS},
 {{NULL, "checkjobs",	      OPT_EMULATE|OPT_ZSH},	 CHECKJOBS},
 {{NULL, "checkrunningjobs",   OPT_EMULATE|OPT_ZSH},	 CHECKRUNNINGJOBS},
 {{NULL, "clobber",	      OPT_EMULATE|OPT_ALL},	 CLOBBER},
+{{NULL, "clobberempty",	      0},			 CLOBBEREMPTY},
 {{NULL, "combiningchars",     0},			 COMBININGCHARS},
 {{NULL, "completealiases",    0},			 COMPLETEALIASES},
 {{NULL, "completeinword",     0},			 COMPLETEINWORD},
@@ -247,6 +250,7 @@ static struct optname optns[] = {
 {{NULL, "shnullcmd",          OPT_EMULATE|OPT_BOURNE},	 SHNULLCMD},
 {{NULL, "shoptionletters",    OPT_EMULATE|OPT_BOURNE},	 SHOPTIONLETTERS},
 {{NULL, "shortloops",	      OPT_EMULATE|OPT_NONBOURNE},SHORTLOOPS},
+{{NULL, "shortrepeat",	      OPT_EMULATE},              SHORTREPEAT},
 {{NULL, "shwordsplit",	      OPT_EMULATE|OPT_BOURNE},	 SHWORDSPLIT},
 {{NULL, "singlecommand",      OPT_SPECIAL},		 SINGLECOMMAND},
 {{NULL, "singlelinezle",      OPT_KSH},			 SINGLELINEZLE},
@@ -255,6 +259,7 @@ static struct optname optns[] = {
 {{NULL, "transientrprompt",   0},			 TRANSIENTRPROMPT},
 {{NULL, "trapsasync",	      0},			 TRAPSASYNC},
 {{NULL, "typesetsilent",      OPT_EMULATE|OPT_BOURNE},	 TYPESETSILENT},
+{{NULL, "typesettounset",     OPT_EMULATE|OPT_BOURNE},	 TYPESETTOUNSET},
 {{NULL, "unset",	      OPT_EMULATE|OPT_BSHELL},	 UNSET},
 {{NULL, "verbose",	      0},			 VERBOSE},
 {{NULL, "vi",		      0},			 VIMODE},
@@ -806,7 +811,7 @@ dosetopt(int optno, int value, int force, char *new_opts)
 	    return -1;
 	}
 
-# ifdef HAVE_INITGROUPS
+# ifdef USE_INITGROUPS
 	/* Set the supplementary groups list.
 	 *
 	 * Note that on macOS, FreeBSD, and possibly some other platforms,

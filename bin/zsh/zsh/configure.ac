@@ -28,7 +28,7 @@ dnl
 AC_INIT
 AC_CONFIG_SRCDIR([Src/zsh.h])
 AC_PREREQ([2.69])
-AC_CONFIG_HEADER(config.h)
+AC_CONFIG_HEADERS([config.h])
 
 dnl What version of zsh are we building ?
 . ${srcdir}/Config/version.mk
@@ -444,9 +444,10 @@ dnl Do you want to look for capability support?
 AC_ARG_ENABLE(cap,
 AS_HELP_STRING([--enable-cap],[enable the search for POSIX capabilities (may require additional headers to be added by hand)]))
 
+# Default off for licensing reasons
 AC_ARG_ENABLE(gdbm,
-AS_HELP_STRING([--disable-gdbm],[turn off search for gdbm library]),
-[gdbm="$enableval"], [gdbm=yes])
+AS_HELP_STRING([--enable-gdbm],[enable the search for the GDBM library (see the zsh/db/gdbm module)]),
+[gdbm="$enableval"], [gdbm=no])
 
 dnl ------------------
 dnl CHECK THE COMPILER
@@ -656,8 +657,6 @@ dnl ------------------
 dnl CHECK HEADER FILES
 dnl ------------------
 AC_HEADER_DIRENT
-AC_HEADER_STDC
-AC_HEADER_TIME
 AC_HEADER_STAT
 AC_HEADER_SYS_WAIT
 
@@ -774,7 +773,7 @@ AS_HELP_STRING([--with-term-lib=LIBS],[search space-separated LIBS for terminal 
   termcap_curses_order="$withval"
   AC_SEARCH_LIBS(tigetstr, [$termcap_curses_order])
 else
-  termcap_curses_order="$ncursesw_test tinfo termcap $ncurses_test curses"
+  termcap_curses_order="$ncursesw_test $ncurses_test tinfow tinfo termcap curses"
 fi],
 [case "$host_os" in
   solaris*)
@@ -783,7 +782,7 @@ fi],
    DL_EXT="${DL_EXT=sl}"
    termcap_curses_order="Hcurses $ncursesw_test $ncurses_test curses termcap" ;;
   *)
-   termcap_curses_order="$ncursesw_test tinfo termcap $ncurses_test curses" ;;
+   termcap_curses_order="$ncursesw_test $ncurses_test tinfow tinfo termcap curses" ;;
 esac])dnl
 
 AH_TEMPLATE([ZSH_NO_XOPEN],
@@ -807,6 +806,8 @@ dnl That's so that on systems where termcap and [n]curses are
 dnl both available and both contain termcap functions, while
 dnl only [n]curses contains terminfo functions, we only link against
 dnl [n]curses.
+LIBS_save_pre_term="$LIBS"
+AC_SEARCH_LIBS(tigetstr, [$termcap_curses_order])
 AC_SEARCH_LIBS(tigetflag, [$termcap_curses_order])
 AC_SEARCH_LIBS(tgetent, [$termcap_curses_order],
   true,
@@ -831,7 +832,56 @@ AC_CACHE_CHECK(if we need to ignore ncurses, zsh_cv_ignore_ncurses,
   zsh_cv_ignore_ncurses=no
   ;;
   *)
-  zsh_cv_ignore_ncurses=yes
+    dnl The lack of -lncurses in the $LIBS might be the result of passing
+    dnl --with-term-lib=^ncurses option. To address this, a test for the tgetent
+    dnl and other functions is ran here, possibly for the second time, just to
+    dnl ensure that the ncurses library doesn't have them.
+    LIBS_save="$LIBS"
+    dnl Remember (the values are used later, around line 3005) and remove the cache
+    ac_cv_search_tigetstr_SAVE="$ac_cv_search_tigetstr"
+    ac_cv_search_tigetnum_SAVE="$ac_cv_search_tigetnum"
+    ac_cv_search_tigetflag_SAVE="$ac_cv_search_tigetflag"
+    ac_cv_search_tgetent_SAVE="$ac_cv_search_tgetent"
+    unset ac_cv_search_tigetstr ac_cv_search_tigetnum ac_cv_search_tigetflag ac_cv_search_tgetent
+    LIBS="$LIBS_save_pre_term"
+
+    dnl Run the checks for all four used terminal functions
+    AC_SEARCH_LIBS(tigetstr, [ncursesw ncurses curses])
+    AC_SEARCH_LIBS(tigetnum, [ncursesw ncurses curses])
+    AC_SEARCH_LIBS(tigetflag, [ncursesw ncurses curses])
+    AC_SEARCH_LIBS(tgetent, [ncursesw ncurses curses])
+    LIBS_result="$LIBS"
+
+    LIBS="$LIBS_save"
+    dnl Restore the cache
+    ac_cv_search_tigetstr="$ac_cv_search_tigetstr_SAVE"
+    ac_cv_search_tigetnum="$ac_cv_search_tigetnum_SAVE"
+    ac_cv_search_tigetflag="$ac_cv_search_tigetflag_SAVE"
+    ac_cv_search_tgetent="$ac_cv_search_tgetent_SAVE"
+
+    case $LIBS_result in
+      *-lncurses*|*-lcurses*)
+        dnl Yes we need to ignore ncurses, its tgetent or tigetflag might
+        dnl conflict with the one from the selected terminal library
+        zsh_cv_ignore_ncurses=yes
+        ;;
+      *)
+        dnl If the tgetent nor tigetflag weren't found in the libncurses*.so, then
+        dnl there will be no conflict with the other terminal library selected (e.g.
+        dnl libtinfo) and it's possible to link ncurses provided that it is working
+        dnl - it is here verified that it has initscr() function to check that
+        AC_SEARCH_LIBS(initscr, [ncursesw ncurses curses])
+        case $LIBS in
+          *-lncurses*|*-lcurses*)
+            dnl No need to ignore curses - it is working and it doesn't
+            dnl have tgetent nor tigetflag
+            zsh_cv_ignore_ncurses=no
+          ;;
+          *)
+            zsh_cv_ignore_ncurses=yes
+          ;;
+        esac
+    esac
   ;;
 esac])
 
@@ -1085,8 +1135,7 @@ dnl Check for sigset_t.  Currently I'm looking in
 dnl <sys/types.h> and <signal.h>.  Others might need
 dnl to be added.
 AC_CACHE_CHECK(for sigset_t, zsh_cv_type_sigset_t,
-[AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[#define _POSIX_C_SOURCE 200809L
-#include <sys/types.h>
+[AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[#include <sys/types.h>
 #include <signal.h>]], [[sigset_t tempsigset;]])],[zsh_cv_type_sigset_t=yes],[zsh_cv_type_sigset_t=no])])
 AH_TEMPLATE([sigset_t],
 [Define to `unsigned int' if <sys/types.h> or <signal.h> doesn't define])
@@ -1343,6 +1392,10 @@ AH_TEMPLATE([TGETENT_ACCEPTS_NULL],
 AC_CACHE_CHECK(if tgetent accepts NULL,
 zsh_cv_func_tgetent_accepts_null,
 [AC_RUN_IFELSE([AC_LANG_SOURCE([[
+#include <fcntl.h>
+#include <stdlib.h>
+int tgetent(char *, char *);
+char *tgetstr(char *, char **);
 main()
 {
     char buf[4096];
@@ -1367,6 +1420,10 @@ fi
 AC_CACHE_CHECK(if tgetent returns 0 on success,
 zsh_cv_func_tgetent_zero_success,
 [AC_RUN_IFELSE([AC_LANG_SOURCE([[
+#include <fcntl.h>
+#include <stdlib.h>
+int tgetent(char *, char*);
+char *tgetstr(char *, char **);
 main()
 {
     char buf[4096];
@@ -1804,6 +1861,7 @@ zsh_cv_rlim_t_is_longer,
 #include <sys/time.h>
 #endif
 #include <sys/resource.h>
+#include <stdlib.h>
 main(){struct rlimit r;exit(sizeof(r.rlim_cur) <= sizeof(long));}]])],[zsh_cv_rlim_t_is_longer=yes],[zsh_cv_rlim_t_is_longer=no],[zsh_cv_rlim_t_is_longer=yes])])
 if test x$zsh_cv_rlim_t_is_longer = xyes; then
   AC_CACHE_CHECK(if rlim_t is a quad,
@@ -1814,6 +1872,7 @@ if test x$zsh_cv_rlim_t_is_longer = xyes; then
 #endif
 #include <stdio.h>
 #include <sys/resource.h>
+#include <stdlib.h>
 main() { 
   struct rlimit r;
   char buf[20];
@@ -1836,6 +1895,7 @@ else
 #include <sys/time.h>
 #endif
 #include <sys/resource.h>
+#include <stdlib.h>
   main(){struct rlimit r;r.rlim_cur=-1;exit(r.rlim_cur<0);}]])],[zsh_cv_type_rlim_t_is_unsigned=yes],[zsh_cv_type_rlim_t_is_unsigned=no],[zsh_cv_type_rlim_t_is_unsigned=no])])
   if test x$zsh_cv_type_rlim_t_is_unsigned = xyes; then
     AC_DEFINE(RLIM_T_IS_UNSIGNED)
@@ -1877,82 +1937,16 @@ zsh_LIMIT_PRESENT(RLIMIT_SIGPENDING)
 zsh_LIMIT_PRESENT(RLIMIT_MSGQUEUE)
 zsh_LIMIT_PRESENT(RLIMIT_NICE)
 zsh_LIMIT_PRESENT(RLIMIT_RTPRIO)
+zsh_LIMIT_PRESENT(RLIMIT_RTTIME)
 zsh_LIMIT_PRESENT(RLIMIT_POSIXLOCKS)
 zsh_LIMIT_PRESENT(RLIMIT_NPTS)
 zsh_LIMIT_PRESENT(RLIMIT_SWAP)
 zsh_LIMIT_PRESENT(RLIMIT_KQUEUES)
+zsh_LIMIT_PRESENT(RLIMIT_UMTXP)
 
-AH_TEMPLATE([RLIMIT_VMEM_IS_RSS],
-[Define to 1 if RLIMIT_VMEM and RLIMIT_RSS both exist and are equal.])
-AC_CACHE_CHECK(if RLIMIT_VMEM and RLIMIT_RSS are the same,
-zsh_cv_rlimit_vmem_is_rss,
-[AC_RUN_IFELSE([AC_LANG_SOURCE([[
-#include <sys/types.h>
-#ifdef HAVE_SYS_TIME_H
-#include <sys/time.h>
-#endif
-#include <sys/resource.h>
-int main()
-{
-int ret = 1;
-#if defined(HAVE_RLIMIT_VMEM) && defined(HAVE_RLIMIT_RSS)
-if (RLIMIT_RSS == RLIMIT_VMEM) ret = 0;
-#endif
-return ret;
-}]])],[zsh_cv_rlimit_vmem_is_rss=yes],[zsh_cv_rlimit_vmem_is_rss=no],[zsh_cv_rlimit_vmem_is_rss=no])])
-
-if test x$zsh_cv_rlimit_vmem_is_rss = xyes; then
-  AC_DEFINE(RLIMIT_VMEM_IS_RSS)
-fi
-
-
-AH_TEMPLATE([RLIMIT_VMEM_IS_AS],
-[Define to 1 if RLIMIT_VMEM and RLIMIT_AS both exist and are equal.])
-AC_CACHE_CHECK(if RLIMIT_VMEM and RLIMIT_AS are the same,
-zsh_cv_rlimit_vmem_is_as,
-[AC_RUN_IFELSE([AC_LANG_SOURCE([[
-#include <sys/types.h>
-#ifdef HAVE_SYS_TIME_H
-#include <sys/time.h>
-#endif
-#include <sys/resource.h>
-int main()
-{
-int ret = 1;
-#if defined(HAVE_RLIMIT_VMEM) && defined(HAVE_RLIMIT_AS)
-if (RLIMIT_AS == RLIMIT_VMEM) ret = 0;
-#endif
-return ret;
-}]])],[zsh_cv_rlimit_vmem_is_as=yes],[zsh_cv_rlimit_vmem_is_as=no],[zsh_cv_rlimit_vmem_is_as=no])])
-
-if test x$zsh_cv_rlimit_vmem_is_as = xyes; then
-  AC_DEFINE(RLIMIT_VMEM_IS_AS)
-fi
-
-
-AH_TEMPLATE([RLIMIT_RSS_IS_AS],
-[Define to 1 if RLIMIT_RSS and RLIMIT_AS both exist and are equal.])
-AC_CACHE_CHECK(if RLIMIT_RSS and RLIMIT_AS are the same,
-zsh_cv_rlimit_rss_is_as,
-[AC_RUN_IFELSE([AC_LANG_SOURCE([[
-#include <sys/types.h>
-#ifdef HAVE_SYS_TIME_H
-#include <sys/time.h>
-#endif
-#include <sys/resource.h>
-int main()
-{
-int ret = 1;
-#if defined(HAVE_RLIMIT_RSS) && defined(HAVE_RLIMIT_AS)
-if (RLIMIT_AS == RLIMIT_RSS) ret = 0;
-#endif
-return ret;
-}]])],[zsh_cv_rlimit_rss_is_as=yes],[zsh_cv_rlimit_rss_is_as=no],[zsh_cv_rlimit_rss_is_as=no])])
-
-if test x$zsh_cv_rlimit_rss_is_as = xyes; then
-  AC_DEFINE(RLIMIT_RSS_IS_AS)
-fi
-
+zsh_LIMITS_EQUAL(VMEM, vmem, RSS, rss)
+zsh_LIMITS_EQUAL(VMEM, vmem, AS, as)
+zsh_LIMITS_EQUAL(RSS, rss, AS, as)
 
 dnl --------------------------------------------
 dnl Check for members of struct rusage
@@ -2008,17 +2002,9 @@ dnl be good enough.
 AH_TEMPLATE([PATH_DEV_FD],
 [Define to the path of the /dev/fd filesystem.])
 AC_CACHE_CHECK(for /dev/fd filesystem, zsh_cv_sys_path_dev_fd,
-[if test "$host_os" = cygwin; then
-dnl In current (2008/12/01) versions of Cygwin these are present but don't
-dnl seem to work smoothly for process substitution; no great surprise
-dnl since getting processes to work at all on Cygwin is a big challenge.
-dnl We'll rely on FIFOs, since they do what we need.
-zsh_cv_sys_path_dev_fd=no
-else
 [for zsh_cv_sys_path_dev_fd in /proc/self/fd /dev/fd no; do
    test x`echo ok|(exec 3<&0; cat $zsh_cv_sys_path_dev_fd/3 2>/dev/null;)` = xok && break
- done]
-fi])
+ done])
 if test x$zsh_cv_sys_path_dev_fd != xno; then
   AC_DEFINE_UNQUOTED(PATH_DEV_FD, "$zsh_cv_sys_path_dev_fd")
 fi
@@ -2078,40 +2064,18 @@ AH_TEMPLATE([HAVE_SETPROCTITLE],
 AC_CHECK_FUNC(setproctitle,AC_DEFINE(HAVE_SETPROCTITLE),
 AC_SEARCH_LIBS(setproctitle,util,AC_DEFINE(HAVE_SETPROCTITLE)))
 
-dnl -------------
-dnl CHECK FOR NIS
-dnl -------------
-AH_TEMPLATE([HAVE_NIS],
-[Define to 1 if you have NIS.])
-AC_CACHE_CHECK(for NIS, zsh_cv_sys_nis,
-[test -f /usr/bin/ypcat && /usr/bin/ypcat passwd.byname > /dev/null 2>&1 && \
-zsh_cv_sys_nis=yes || zsh_cv_sys_nis=no])
-if test x$zsh_cv_sys_nis = xyes; then
-  AC_DEFINE(HAVE_NIS)
-dnl Some systems (Solaris 2.x, Linux Redhat 5.x) require
-dnl libnsl (Network Services Library) to find yp_all
-  AC_SEARCH_LIBS(yp_all, nsl)
-fi
-
-dnl -----------------
-dnl CHECK FOR NISPLUS
-dnl -----------------
-AH_TEMPLATE([HAVE_NIS_PLUS],
-[Define to 1 if you have NISPLUS.])
-AC_CACHE_CHECK(for NIS+, zsh_cv_sys_nis_plus,
-[test x$ac_cv_func_nis_list = xyes && test -f /usr/bin/nisls && \
- /usr/bin/nisls > /dev/null 2>&1 && \
-zsh_cv_sys_nis_plus=yes || zsh_cv_sys_nis_plus=no])
-if test x$zsh_cv_sys_nis_plus = xyes; then
-  AC_DEFINE(HAVE_NIS_PLUS)
-fi
+dnl CHECK FOR prctl() FOR jobs -Z / ARGV0 when checking with ps -e
+AH_TEMPLATE([HAVE_PRCTL],
+[Define to 1 if the system supports `prctl' to change process name])
+AC_CHECK_FUNC(prctl,AC_DEFINE(HAVE_PRCTL),
+AC_SEARCH_LIBS(prctl,c,AC_DEFINE(HAVE_PRCTL)))
 
 dnl ----------------------------------------
 dnl CHECK FOR LOCATION OF {U,W}TMP{,X} FILES
 dnl ----------------------------------------
 zsh_PATH_UTMP(utmp)
 zsh_PATH_UTMP(wtmp)
-zsh_PATH_UTMP(utmpx)
+zsh_PATH_UTMP(utmpx,utx.active)
 zsh_PATH_UTMP(wtmpx)
 
 dnl -------------------
@@ -2205,16 +2169,14 @@ dnl -----------
 dnl named FIFOs
 dnl -----------
 dnl
-dnl Named FIFOs work well enough on recent versions of Cygwin
-dnl to provide what we want.  Simply enable them.
 AC_CACHE_CHECK(if named FIFOs work,
 zsh_cv_sys_fifo,
-[if test "$host_os" = cygwin; then
-zsh_cv_sys_fifo=yes
-else
-AC_RUN_IFELSE([AC_LANG_SOURCE([[
+[AC_RUN_IFELSE([AC_LANG_SOURCE([[
 #include <fcntl.h>
 #include <signal.h>
+#include <unistd.h>
+#include <stdlib.h>
+#include <sys/stat.h>
 main()
 {
     char c;
@@ -2240,11 +2202,70 @@ main()
     exit(ret);
 }
 ]])],[zsh_cv_sys_fifo=yes],[zsh_cv_sys_fifo=no],[zsh_cv_sys_fifo=yes])
-fi])
+])
 AH_TEMPLATE([HAVE_FIFOS],
 [Define to 1 if system has working FIFOs.])
 if test x$zsh_cv_sys_fifo = xyes; then
   AC_DEFINE(HAVE_FIFOS)
+fi
+
+dnl -----------
+dnl check that lseek() correctly reports seekability.
+dnl -----------
+AC_CACHE_CHECK(if lseek() correctly reports seekability,
+zsh_cv_sys_lseek,
+[AC_RUN_IFELSE([AC_LANG_SOURCE([[
+#include <stdio.h>
+#include <sys/types.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+int main() {
+    int pipefd[2], fd;
+    off_t ret;
+    char* tmpfile = "seekfiletest.tmp";
+    if ((fd = open(tmpfile, O_CREAT, S_IRUSR)) < 0) {
+	fprintf(stderr, "creating file failed\n");
+	return 1;
+    }
+    ret = lseek(fd, 0, SEEK_CUR);
+    close(fd);
+    unlink(tmpfile);
+    if (ret == (off_t)-1) {
+	fprintf(stderr, "lseek on regular file failed\n");
+	return 1;
+    }
+    if (pipe(pipefd) < 0) {
+	fprintf(stderr, "creating pipe failed\n");
+	return 1;
+    }
+    write(pipefd[1], "abcdefgh", 8);
+    ret = lseek(pipefd[0], 0, SEEK_CUR);
+    close(pipefd[0]);
+    close(pipefd[1]);
+    if (ret != (off_t)-1) {
+	fprintf(stderr, "lseek on pipe succeeded\n");
+	return 1;
+    }
+    if ((fd = socket(AF_UNIX, SOCK_STREAM, 0)) < 0) {
+	fprintf(stderr, "creating UNIX domain socket failed\n");
+	return 1;
+    }
+    ret = lseek(fd, 0, SEEK_CUR);
+    close(fd);
+    if (ret != (off_t)-1) {
+	fprintf(stderr, "lseek on UNIX domain socket succeeded\n");
+	return 1;
+    }
+    return 0;
+}
+]])],[zsh_cv_sys_lseek=yes],[zsh_cv_sys_lseek=no],[zsh_cv_sys_lseek=yes])
+])
+AH_TEMPLATE([USE_LSEEK],
+[Define to 1 if lseek() can be used for SHIN.])
+if test x$zsh_cv_sys_lseek = xyes; then
+  AC_DEFINE(USE_LSEEK)
 fi
 
 dnl -----------
@@ -2256,6 +2277,7 @@ zsh_cv_sys_link,
 [AC_RUN_IFELSE([AC_LANG_SOURCE([[
 #include <unistd.h>
 #include <fcntl.h>
+#include <stdlib.h>
 main()
 {
     int ret;
@@ -2288,6 +2310,7 @@ zsh_cv_sys_killesrch,
 #include <unistd.h>
 #include <signal.h>
 #include <errno.h>
+#include <stdlib.h>
 main()
 {
     int pid = (getpid() + 10000) & 0xffffff;
@@ -2313,6 +2336,7 @@ if test x$signals_style = xPOSIX_SIGNALS; then
     [AC_RUN_IFELSE([AC_LANG_SOURCE([[
 #include <signal.h>
 #include <unistd.h>
+#include <stdlib.h>
 int child=0;
 void handler(sig)
     int sig;
@@ -2364,6 +2388,7 @@ case "x$zsh_working_tcsetpgrp" in
 #include <sys/types.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <stdlib.h>
 main() {
     int fd;
     int ret;
@@ -2407,6 +2432,10 @@ if test x$ac_cv_func_getpwnam = xyes; then
     zsh_cv_sys_getpwnam_faked,
     [AC_RUN_IFELSE([AC_LANG_SOURCE([[
 #include <pwd.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <unistd.h>
 main() {
     struct passwd *pw1, *pw2;
     char buf[1024], name[1024];
@@ -2461,7 +2490,7 @@ if test x$ac_cv_have_dev_ptmx = xyes -o x$ac_cv_func_posix_openpt = xyes && \
    test x$ac_cv_func_ptsname = xyes; then
    AC_CACHE_CHECK([if /dev/ptmx is usable],
    ac_cv_use_dev_ptmx,
-   [AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[#ifdef __linux
+   [AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[#if defined(__linux) || defined(__CYGWIN__)
 #define _GNU_SOURCE 1
 #endif
 #include <stdlib.h>
@@ -2497,6 +2526,7 @@ wmemcpy wmemmove wmemset; do
       AC_MSG_NOTICE([all functions found, multibyte support enabled])
       zsh_cv_c_unicode_support=yes
     else
+      # Warns at the end of configure
       AC_MSG_NOTICE([missing functions, multibyte support disabled])
       zsh_cv_c_unicode_support=no
     fi
@@ -2734,6 +2764,7 @@ elif test "x$dynamic" = xyes; then
    [AC_RUN_IFELSE([AC_LANG_SOURCE([[/* Test for whether ELF binaries are produced */
 #include <fcntl.h>
 #include <stdlib.h>
+#include <unistd.h>
 main(argc, argv)
 int argc;
 char *argv[];
@@ -2887,6 +2918,7 @@ EOM
     AC_TRY_COMMAND($DLLD $LDFLAGS $DLLDFLAGS -o conftest.$DL_EXT conftest.o 1>&AS_MESSAGE_LOG_FD) &&
     AC_RUN_IFELSE([AC_LANG_SOURCE([[
 #include <stdio.h>
+#include <stdlib.h>
 #ifdef HPUX10DYNAMIC
 #include <dl.h>
 #define RTLD_LAZY BIND_DEFERRED
@@ -3200,6 +3232,22 @@ AC_CONFIG_COMMANDS([stamp-h], [echo >stamp-h])
 
 AC_OUTPUT
 
+dnl Copy pre-built man pages and help files, for tarball out-of-tree builds.
+for manpage in `cd ${srcdir} && echo Doc/*.1`; do
+  if test x"$manpage" != x"Doc/*.1" && ! test -e "${manpage}"; then
+    cp ${srcdir}/${manpage} ./Doc/
+  fi
+done
+if ! test -e Doc/help.txt; then
+  cp ${srcdir}/Doc/help.txt ./Doc/
+fi
+mkdir -p ./Doc/help
+for helpfile in `cd ${srcdir} && echo Doc/help/*`; do
+  if test x"$helpfile" != x"Doc/help/*" && ! test -e "${helpfile}"; then
+    cp ${srcdir}/${helpfile} ./Doc/help/
+  fi
+done
+
 eval "zshbin1=${bindir}"
 eval "zshbin2=${zshbin1}"
 eval "zshman1=${mandir}"
@@ -3243,13 +3291,18 @@ fi
 echo "See config.modules for installed modules and functions.
 "
 
-case x$LIBS in
-  *-lgdbm*)
-  echo "WARNING: zsh will be linked against libgdbm.
-This means the binary is covered by the GNU General Public License.
-This does not affect the source code.
-Run configure with --disable-gdbm if required."
-  ;;
-esac
+if test x$zsh_cv_c_unicode_support != xyes; then
+  if test "x$zfuncs_absent" = x; then
+    # The user opted out.
+    AC_MSG_WARN([You have chosen to build without multibyte support.])
+    AC_MSG_WARN([This configuration may not be suitable for production use. It is known to cause errors in 'make test'. We strongly recommend to re-run configure with --enable-multibyte.])
+  else
+    # Some requisite functions are missing.
+    AC_MSG_WARN([Multibyte support cannot be enabled: some standard library functions are missing: $zfuncs_absent])
+    AC_MSG_WARN([This configuration may not be suitable for production use. It is known to cause errors in 'make test'. If your system provides those functions, we recommend to re-run configure appropriately.])
+    # If your system doesn't have those functions, consider patching the
+    # test suite and sending the patch to zsh-workers@ for inclusion.
+  fi
+fi
 
 exit 0

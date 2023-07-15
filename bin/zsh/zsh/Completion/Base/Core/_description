@@ -1,13 +1,14 @@
 #autoload
 
-local name gropt nopt xopt format gname hidden hide match opts tag sort
+local name nopt xopt format gname hidden hide match opts tag
+local -a ign gropt sort
+local -a match mbegin mend
 
 opts=()
 
-gropt=(-J)
 xopt=(-X)
 nopt=()
-zparseopts -K -D -a nopt 1 2 V=gropt J=gropt x=xopt
+zparseopts -K -D -a nopt 1 2 V=gropt J=ign x=xopt
 
 3="${${3##[[:blank:]]#}%%[[:blank:]]#}"
 [[ -n "$3" ]] && _lastdescr=( "$_lastdescr[@]" "$3" )
@@ -33,14 +34,18 @@ zstyle -s ":completion:${curcontext}:$1" matcher match &&
 
 # Use sort style, but ignore `menu' value to help _expand.
 # Also don't override explicit use of -V.
-if { zstyle -s ":completion:${curcontext}:$1" sort sort ||
-     zstyle -s ":completion:${curcontext}:" sort sort; } &&
-    [[ "$gropt" = -J && $sort != menu ]]; then
-    if [[ "$sort" = (yes|true|1|on) ]]; then
-	gropt=(-J)
-    else
-	gropt=(-V)
+if [[ -z "$gropt" ]]; then
+  if zstyle -a ":completion:${curcontext}:$1" sort sort ||
+     zstyle -a ":completion:${curcontext}:" sort sort
+  then
+    if [[ -z "${(@)sort:#(match|numeric|reverse)}" ]]; then
+      gropt=( -o ${(j.,.)sort} )
+    elif [[ "$sort" != (yes|true|1|on|menu) ]]; then
+      gropt=( -o nosort )
     fi
+  fi
+else
+  gropt=( -o nosort )
 fi
 
 if [[ -z "$_comp_no_ignore" ]]; then
@@ -74,20 +79,27 @@ shift 2
 if [[ -z "$1" && $# -eq 1 ]]; then
   format=
 elif [[ -n "$format" ]]; then
-  zformat -f format "$format" "d:$1" "${(@)argv[2,-1]}"
+  if [[ -z $2 ]]; then
+    argv+=( h:${1%%( ##\((#b)([^\)]#[^0-9-][^\)]#)(#B)\)|)( ##\((#b)([0-9-]##)(#B)\)|)( ##\[(#b)([^\]]##)(#B)\]|)} )
+    [[ -n $match[1] ]] && argv+=( m:$match[1] )
+    [[ -n $match[2] ]] && argv+=( r:$match[2] )
+    [[ -n $match[3] ]] && argv+=( o:$match[3] )
+  fi
+
+  zformat -F format "$format" "d:$1" "${(@)argv[2,-1]}"
 fi
 
 if [[ -n "$gname" ]]; then
   if [[ -n "$format" ]]; then
-    set -A "$name" "$opts[@]" "$nopt[@]" "$gropt" "$gname" "$xopt" "$format"
+    set -A "$name" "$opts[@]" "$nopt[@]" "$gropt[@]" -J "$gname" "$xopt" "$format"
   else
-    set -A "$name" "$opts[@]" "$nopt[@]" "$gropt" "$gname"
+    set -A "$name" "$opts[@]" "$nopt[@]" "$gropt[@]" -J "$gname"
   fi
 else
   if [[ -n "$format" ]]; then
-    set -A "$name" "$opts[@]" "$nopt[@]" "$gropt" -default- "$xopt" "$format"
+    set -A "$name" "$opts[@]" "$nopt[@]" "$gropt[@]" -J -default- "$xopt" "$format"
   else
-    set -A "$name" "$opts[@]" "$nopt[@]" "$gropt" -default-
+    set -A "$name" "$opts[@]" "$nopt[@]" "$gropt[@]" -J -default-
   fi
 fi
 

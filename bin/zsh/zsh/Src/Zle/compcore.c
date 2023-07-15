@@ -648,7 +648,7 @@ callcompfunc(char *s, char *fn)
 	if (compredirs)
 	    freearray(compredirs);
         if (rdstrs)
-            compredirs = zlinklist2array(rdstrs);
+            compredirs = zlinklist2array(rdstrs, 1);
         else
             compredirs = (char **) zshcalloc(sizeof(char *));
 
@@ -821,6 +821,7 @@ callcompfunc(char *s, char *fn)
 	sfcontext = SFC_CWIDGET;
 	NEWHEAPS(compheap) {
 	    LinkList largs = NULL;
+	    int oxt = isset(XTRACE);
 
 	    if (*cfargs) {
 		char **p = cfargs;
@@ -830,7 +831,9 @@ callcompfunc(char *s, char *fn)
 		while (*p)
 		    addlinknode(largs, dupstring(*p++));
 	    }
+	    opts[XTRACE] = 0;
 	    cfret = doshfunc(shfunc, largs, 1);
+	    opts[XTRACE] = oxt;
 	} OLDHEAPS;
 	sfcontext = osc;
 	endparamscope();
@@ -1122,6 +1125,18 @@ check_param(char *s, int set, int test)
      *
      * TODO: passing s as a parameter while we get some mysterious
      * offset "offs" into it via a global sucks badly.
+     *
+     * From ../lex.c we know:
+     * wb is the beginning position of the current word in the line
+     * we is the position of the end of the current word in the line
+     * From zle_tricky.c we know:
+     * offs is position within the word where we are completing
+     *
+     * So wb + offs is the current cursor position if COMPLETE_IN_WORD
+     * is set, otherwise it is the end of the word (same as we).
+     * 
+     * Note below we are thus stepping backward from our completion
+     * position to find a '$' in the current word (if any).
      */ 
     for (p = s + offs; ; p--) {
 	if (*p == String || *p == Qstring) {
@@ -1168,13 +1183,13 @@ check_param(char *s, int set, int test)
 	    char *tb = b;
 
 	    /* If this is a ${...}, see if we are before the '}'. */
-	    if (!skipparens(Inbrace, Outbrace, &tb))
+	    if (!skipparens(Inbrace, Outbrace, &tb) && tb - s <= offs)
 		return NULL;
 
 	    /* Ignore the possible (...) flags. */
 	    b++, br++;
 	    if ((qstring ? skipparens('(', ')', &b) :
-		 skipparens(Inpar, Outpar, &b)) > 0) {
+		 skipparens(Inpar, Outpar, &b)) > 0 || b - s > offs) {
 		/*
 		 * We are still within the parameter flags.  There's no
 		 * point trying to do anything clever here with
@@ -1492,7 +1507,7 @@ set_comp_sep(void)
      *     are specially handled (but currently only if RCQUOTES is not
      *     set, which isn't necessarily correct if the quotes were typed by
      *     the user).
-     * osq: c.f. odq, taking account of Snull's and embeded "'"'s.
+     * osq: c.f. odq, taking account of Snull's and embedded "'"'s.
      * qttype: type of quotes using standard QT_* definitions.
      * lsq: when quoting is single quotes (QT_SINGLE), counts the offset
      *      adjustment needed in the word being examined in the lexer loop.
@@ -1922,7 +1937,7 @@ set_comp_sep(void)
 mod_export void
 set_list_array(char *name, LinkList l)
 {
-    setaparam(name, zlinklist2array(l));
+    setaparam(name, zlinklist2array(l, 1));
 }
 
 /* Get the words from a variable or a (list of words). */
@@ -2058,10 +2073,10 @@ addmatches(Cadata dat, char **argv)
     /* ms: "match string" - string to use as completion.
      * Overloaded at one place as a temporary. */
     char *s, *ms, *lipre = NULL, *lisuf = NULL, *lpre = NULL, *lsuf = NULL;
-    char **aign = NULL, **dparr = NULL, *oaq = autoq, *oppre = dat->ppre;
+    char **aign = NULL, ***dparr = NULL, *oaq = autoq, *oppre = dat->ppre;
     char *oqp = qipre, *oqs = qisuf, qc, **disp = NULL, *ibuf = NULL;
     char **arrays = NULL;
-    int lpl, lsl, bcp = 0, bcs = 0, bpadd = 0, bsadd = 0;
+    int dind, lpl, lsl, bcp = 0, bcs = 0, bpadd = 0, bsadd = 0;
     int ppl = 0, psl = 0, ilen = 0;
     int llpl = 0, llsl = 0, nm = mnum, gflags = 0, ohp = haspattern;
     int isexact, doadd, ois = instring, oib = inbackt;
@@ -2069,7 +2084,7 @@ addmatches(Cadata dat, char **argv)
     struct cmlist mst;
     Cmlist oms = mstack;
     Patprog cp = NULL, *pign = NULL;
-    LinkList aparl = NULL, oparl = NULL, dparl = NULL;
+    LinkList aparl = NULL, oparl = NULL, *dparl = NULL;
     Brinfo bp, bpl = brbeg, obpl, bsl = brend, obsl;
     Heap oldheap;
 
@@ -2080,6 +2095,9 @@ addmatches(Cadata dat, char **argv)
 
         /* Select the group in which to store the matches. */
         gflags = (((dat->aflags & CAF_NOSORT ) ? CGF_NOSORT  : 0) |
+                  ((dat->aflags & CAF_MATSORT) ? CGF_MATSORT : 0) |
+                  ((dat->aflags & CAF_NUMSORT) ? CGF_NUMSORT : 0) |
+                  ((dat->aflags & CAF_REVSORT) ? CGF_REVSORT : 0) |
                   ((dat->aflags & CAF_UNIQALL) ? CGF_UNIQALL : 0) |
                   ((dat->aflags & CAF_UNIQCON) ? CGF_UNIQCON : 0));
         if (dat->group) {
@@ -2094,7 +2112,7 @@ addmatches(Cadata dat, char **argv)
             curexpl->always = !!dat->mesg;
             curexpl->count = curexpl->fcount = 0;
             curexpl->str = dupstring(dat->mesg ? dat->mesg : dat->exp);
-            if (dat->mesg)
+            if (dat->mesg && !dat->dpar && !dat->opar && !dat->apar)
                 addexpl(1);
         } else
             curexpl = NULL;
@@ -2160,11 +2178,24 @@ addmatches(Cadata dat, char **argv)
 	if (dat->opar)
 	    oparl = newlinklist();
 	if (dat->dpar) {
-	    if (*(dat->dpar) == '(')
-		dparr = NULL;
-	    else if ((dparr = get_user_var(dat->dpar)) && !*dparr)
-		dparr = NULL;
-	    dparl = newlinklist();
+	    int darr = 0, dparlen = arrlen(dat->dpar);
+	    char **tail = dat->dpar + dparlen;
+
+	    dparr = (char ***)hcalloc((1 + dparlen) * sizeof(char **));
+	    dparl = (LinkList *)hcalloc((1 + dparlen) * sizeof(LinkList));
+	    queue_signals();
+	    while (darr < dparlen) {
+		if ((dparr[darr] = getaparam(dat->dpar[darr])) && *dparr[darr]) {
+		    dparr[darr] = arrdup(dparr[darr]);
+		    dparl[darr++] = newlinklist();
+		} else {
+		    /* swap in the last -D argument if we didn't get a non-empty array */
+		    dat->dpar[darr] = *--tail;
+		    *tail = NULL;
+		    --dparlen;
+	        }
+	    }
+	    unqueue_signals();
 	}
 	/* Store the matcher in our stack of matchers. */
 	if (dat->match) {
@@ -2481,8 +2512,10 @@ addmatches(Cadata dat, char **argv)
 		}
 		if (!addit) {
 		    compignored++;
-		    if (dparr && !*++dparr)
-			dparr = NULL;
+		    for (dind = 0; dparl && dparl[dind]; dind++) {
+			if (dparr[dind] && !*++dparr[dind])
+			    dparr[dind] = NULL;
+		    }
 		    goto next_array;
 		}
 	    }
@@ -2499,8 +2532,10 @@ addmatches(Cadata dat, char **argv)
 					   !(dat->flags & CMF_FILE) ? 1 : 2) : 0),
 					 &bpl, bcp, &bsl, bcs,
 					 &isexact))) {
-		if (dparr && !*++dparr)
-		    dparr = NULL;
+		for (dind = 0; dparl && dparl[dind]; dind++) {
+		    if (dparr[dind] && !*++dparr[dind])
+			dparr[dind] = NULL;
+		}
 		goto next_array;
 	    }
 	    if (doadd) {
@@ -2527,10 +2562,14 @@ addmatches(Cadata dat, char **argv)
 		    addlinknode(aparl, ms);
 		if (dat->opar)
 		    addlinknode(oparl, s);
-		if (dat->dpar && dparr) {
-		    addlinknode(dparl, *dparr);
-		    if (!*++dparr)
-			dparr = NULL;
+		if (dat->dpar) {
+		    for (dind = 0; dparl[dind]; dind++) {
+			if (dparr[dind]) {
+			    addlinknode(dparl[dind], *dparr[dind]);
+			    if (!*++dparr[dind])
+				dparr[dind] = NULL;
+			}
+		    }
 		}
 		free_cline(lc);
 	    }
@@ -2558,8 +2597,10 @@ addmatches(Cadata dat, char **argv)
 	    set_list_array(dat->apar, aparl);
 	if (dat->opar)
 	    set_list_array(dat->opar, oparl);
-	if (dat->dpar)
-	    set_list_array(dat->dpar, dparl);
+	if (dat->dpar) {
+	    for (dind = 0; dparl[dind]; dind++)
+		set_list_array(dat->dpar[dind], dparl[dind]);
+	}
 	if (dat->exp)
 	    addexpl(0);
 	if (!hasallmatch && (dat->aflags & CAF_ALL)) {
@@ -3034,8 +3075,9 @@ begcmgroup(char *n, int flags)
 		HEAP_ERROR(p->heap_id);
 	    }
 #endif
-	    if (p->name &&
-		flags == (p->flags & (CGF_NOSORT|CGF_UNIQALL|CGF_UNIQCON)) &&
+	    if (p->name && flags ==
+		(p->flags & (CGF_NOSORT|CGF_UNIQALL|CGF_UNIQCON|
+			     CGF_MATSORT|CGF_NUMSORT|CGF_REVSORT)) &&
 		!strcmp(n, p->name)) {
 		mgroup = p;
 
@@ -3118,32 +3160,35 @@ addexpl(int always)
 
 /* The comparison function for matches (used for sorting). */
 
+static int matchorder;
+
 /**/
 static int
 matchcmp(Cmatch *a, Cmatch *b)
 {
-    if ((*a)->disp && !((*a)->flags & CMF_MORDER)) {
-	if ((*b)->disp) {
-	    if ((*a)->flags & CMF_DISPLINE) {
-		if ((*b)->flags & CMF_DISPLINE)
-		    return strcmp((*a)->disp, (*b)->disp);
-		else
-		    return -1;
-	    } else {
-		if ((*b)->flags & CMF_DISPLINE)
-		    return 1;
-		else
-		    return strcmp((*a)->disp, (*b)->disp);
-	    }
-	}
-	return -1;
-    }
-    if ((*b)->disp && !((*b)->flags & CMF_MORDER))
-	return 1;
+    const char *as, *bs;
+    int cmp = !!(*b)->disp - !!(*a)->disp;
+    int sortdir = (matchorder & CGF_REVSORT) ? -1 : 1;
 
-    return zstrcmp((*a)->str, (*b)->str, (SORTIT_IGNORING_BACKSLASHES|
-					  (isset(NUMERICGLOBSORT) ?
-					   SORTIT_NUMERICALLY : 0)));
+    /* if match sorting selected or we have no display strings */
+    if ((matchorder & CGF_MATSORT) || (!cmp && !(*a)->disp)) {
+	as = (*a)->str;
+	bs = (*b)->str;
+    } else {
+        if (cmp) /* matches with display strings come first */
+	    return cmp;
+
+	cmp = ((*b)->flags & CMF_DISPLINE) - ((*a)->flags & CMF_DISPLINE);
+        if (cmp) /* sort one-per-line display strings first */
+	    return cmp;
+
+	as = (*a)->disp;
+	bs = (*b)->disp;
+    }
+
+    return sortdir * zstrcmp(as, bs, SORTIT_IGNORING_BACKSLASHES|
+	    ((isset(NUMERICGLOBSORT) ||
+	    matchorder & CGF_NUMSORT) ? SORTIT_NUMERICALLY : 0));
 }
 
 /* This tests whether two matches are equal (would produce the same
@@ -3202,16 +3247,20 @@ makearray(LinkList l, int type, int flags, int *np, int *nlp, int *llp)
 	    }
 	    *cp = NULL;
 	}
-    } else {
+    } else if (n > 0) {
 	if (!(flags & CGF_NOSORT)) {
 	    /* Now sort the array (it contains matches). */
+	    matchorder = flags;
 	    qsort((void *) rp, n, sizeof(Cmatch),
 		  (int (*) _((const void *, const void *)))matchcmp);
 
+	    /* since the matches are sorted and the default is to remove
+	     * all duplicates, -1 (remove only consecutive dupes) is a no-op,
+	     * so this condition only checks for -2 */
 	    if (!(flags & CGF_UNIQCON)) {
 		int dup;
 
-		/* And delete the ones that occur more than once. */
+		/* we did not pass -2 so go ahead and remove those dupes */
 		for (ap = cp = rp; *ap; ap++) {
 		    *cp++ = *ap;
 		    for (bp = ap; bp[1] && matcheq(*ap, bp[1]); bp++, n--);
@@ -3233,30 +3282,47 @@ makearray(LinkList l, int type, int flags, int *np, int *nlp, int *llp)
 		if ((*ap)->flags & (CMF_NOLIST | CMF_MULT))
 		    nl++;
 	    }
+	/* used -O nosort or -V, don't sort */
 	} else {
+	    /* didn't use -1 or -2, so remove all duplicates (efficient) */
 	    if (!(flags & CGF_UNIQALL) && !(flags & CGF_UNIQCON)) {
-                int dup;
+                int dup, del = 0;
 
-		for (ap = rp; *ap; ap++) {
-		    for (bp = cp = ap + 1; *bp; bp++) {
-			if (!matcheq(*ap, *bp))
-			    *cp++ = *bp;
-			else
-			    n--;
+		/* To avoid O(n^2) here, sort a copy of the list, then remove marked elements */
+		matchorder = flags;
+		Cmatch *sp, *asp;
+		sp = (Cmatch *) zhalloc((n + 1) * sizeof(Cmatch));
+		memcpy(sp, rp, (n + 1) * sizeof(Cmatch));
+		qsort((void *) sp, n, sizeof(Cmatch),
+		      (int (*) _((const void *, const void *)))matchcmp);
+		for (asp = sp + 1; *asp; asp++) {
+		    Cmatch *ap = asp - 1, *bp = asp;
+		    if (matcheq(*ap, *bp)) {
+			bp[0]->flags = CMF_DELETE;
+			del = 1;
+		    } else if (!ap[0]->disp) {
+			/* Mark those, that would show the same string in the list. */
+			for (dup = 0; bp[0] && !(bp[0])->disp &&
+				 !strcmp((*ap)->str, (bp[0])->str); bp = ++sp) {
+			    (bp[0])->flags |= CMF_MULT;
+			    dup = 1;
+			}
+			if (dup)
+			    (*ap)->flags |= CMF_FMULT;
 		    }
-		    *cp = NULL;
-                    if (!(*ap)->disp) {
-                        for (dup = 0, bp = ap + 1; *bp; bp++)
-                            if (!(*bp)->disp &&
-                                !((*bp)->flags & CMF_MULT) &&
-                                !strcmp((*ap)->str, (*bp)->str)) {
-                                (*bp)->flags |= CMF_MULT;
-                                dup = 1;
-                            }
-                        if (dup)
-                            (*ap)->flags |= CMF_FMULT;
-                    }
 		}
+		if (del) {
+		    int n_orig = n;
+		    for (bp = rp, ap = rp; bp < rp + n_orig; ap++, bp++) {
+			while (bp < rp + n_orig && (bp[0]->flags & CMF_DELETE)) {
+			    bp++;
+			    n--;
+			}
+			*ap = *bp;
+		    }
+		    *ap = NULL;
+		}
+	    /* passed -1 but not -2, so remove consecutive duplicates (efficient) */
 	    } else if (!(flags & CGF_UNIQCON)) {
 		int dup;
 

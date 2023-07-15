@@ -57,15 +57,10 @@
 /* Undefine if you don't want local features. By default this is defined. */
 #undef CONFIG_LOCALE
 
-/* Define to one of `_getb67', `GETB67', `getb67' for Cray-2 and Cray-YMP
-   systems. This function is required for `alloca.c' support on those systems.
-   */
-#undef CRAY_STACKSEG_END
-
 /* Define to a custom value for the ZSH_PATCHLEVEL parameter */
 #undef CUSTOM_PATCHLEVEL
 
-/* Define to 1 if using `alloca.c'. */
+/* Define to 1 if using 'alloca.c'. */
 #undef C_ALLOCA
 
 /* Define to 1 if you want to debug zsh. */
@@ -128,11 +123,10 @@
 /* Define if TIOCGWINSZ is defined in sys/ioctl.h but not in termios.h. */
 #undef GWINSZ_IN_SYS_IOCTL
 
-/* Define to 1 if you have `alloca', as a function or macro. */
+/* Define to 1 if you have 'alloca', as a function or macro. */
 #undef HAVE_ALLOCA
 
-/* Define to 1 if you have <alloca.h> and it should be used (not on Ultrix).
-   */
+/* Define to 1 if <alloca.h> works. */
 #undef HAVE_ALLOCA_H
 
 /* Define to 1 if you have the <bind/netdb.h> header file. */
@@ -451,14 +445,8 @@
 /* Define to 1 if you have the `nice' function. */
 #undef HAVE_NICE
 
-/* Define to 1 if you have NIS. */
-#undef HAVE_NIS
-
 /* Define to 1 if you have the `nis_list' function. */
 #undef HAVE_NIS_LIST
-
-/* Define to 1 if you have NISPLUS. */
-#undef HAVE_NIS_PLUS
 
 /* Define to 1 if you have the `nl_langinfo' function. */
 #undef HAVE_NL_LANGINFO
@@ -501,6 +489,9 @@
 
 /* Define to 1 if you have the `posix_openpt' function. */
 #undef HAVE_POSIX_OPENPT
+
+/* Define to 1 if the system supports `prctl' to change process name */
+#undef HAVE_PRCTL
 
 /* Define to 1 if you have the `ptsname' function. */
 #undef HAVE_PTSNAME
@@ -580,6 +571,9 @@
 /* Define to 1 if RLIMIT_RTPRIO is present (whether or not as a macro). */
 #undef HAVE_RLIMIT_RTPRIO
 
+/* Define to 1 if RLIMIT_RTTIME is present (whether or not as a macro). */
+#undef HAVE_RLIMIT_RTTIME
+
 /* Define to 1 if RLIMIT_SBSIZE is present (whether or not as a macro). */
 #undef HAVE_RLIMIT_SBSIZE
 
@@ -591,6 +585,9 @@
 
 /* Define to 1 if RLIMIT_TCACHE is present (whether or not as a macro). */
 #undef HAVE_RLIMIT_TCACHE
+
+/* Define to 1 if RLIMIT_UMTXP is present (whether or not as a macro). */
+#undef HAVE_RLIMIT_UMTXP
 
 /* Define to 1 if RLIMIT_VMEM is present (whether or not as a macro). */
 #undef HAVE_RLIMIT_VMEM
@@ -1132,7 +1129,9 @@
 /* Define to 1 if the `S_IS*' macros in <sys/stat.h> do not work properly. */
 #undef STAT_MACROS_BROKEN
 
-/* Define to 1 if you have the ANSI C header files. */
+/* Define to 1 if all of the C90 standard headers exist (not just the ones
+   required in a freestanding environment). This macro is provided for
+   backward compatibility; new code need not use it. */
 #undef STDC_HEADERS
 
 /* Define to 1 if you use SYS style signal handling (and can block signals).
@@ -1151,9 +1150,6 @@
 /* Define if sys/time.h and sys/select.h cannot be both included. */
 #undef TIME_H_SELECT_H_CONFLICTS
 
-/* Define to 1 if you can safely include both <sys/time.h> and <time.h>. */
-#undef TIME_WITH_SYS_TIME
-
 /* Define to 1 if all the kit for using /dev/ptmx for ptys is available. */
 #undef USE_DEV_PTMX
 
@@ -1162,6 +1158,9 @@
 
 /* Define to 1 if h_errno is not defined by the system. */
 #undef USE_LOCAL_H_ERRNO
+
+/* Define to 1 if lseek() can be used for SHIN. */
+#undef USE_LSEEK
 
 /* Define to 1 if you want to allocate stack memory e.g. with `alloca'. */
 #undef USE_STACK_ALLOCATION
@@ -1221,11 +1220,6 @@
 /* Define to the base type of the third argument of accept */
 #undef ZSOCKLEN_T
 
-/* Enable large inode numbers on Mac OS X 10.5.  */
-#ifndef _DARWIN_USE_64_BIT_INODE
-# define _DARWIN_USE_64_BIT_INODE 1
-#endif
-
 /* Number of bits in a file offset, on hosts where this is settable. */
 #undef _FILE_OFFSET_BITS
 
@@ -1247,7 +1241,7 @@
 /* Define to `long int' if <sys/types.h> does not define. */
 #undef off_t
 
-/* Define to `int' if <sys/types.h> does not define. */
+/* Define as a signed integer type capable of holding a process identifier. */
 #undef pid_t
 
 /* Define to the type used in struct rlimit. */

@@ -13,12 +13,12 @@ value is the content of the file.  The value is treated identically to any
 other text coming from a parameter.  The value may also be assigned to, in
 which case the file in question is written (whether or not it originally
 existed); or an element may be unset, which will delete the file in
-question.  For example, `tt(vared mapfile[myfile])' works as expected,
+question.  For example, `tt(vared 'mapfile[myfile]')' works as expected,
 editing the file `tt(myfile)'.
 
 When the array is accessed as a whole, the keys are the names of files in
 the current directory, and the values are empty (to save a huge overhead in
-memory).  Thus tt(${(k)mapfile}) has the same affect as the glob operator
+memory).  Thus tt(${(k)mapfile}) has the same effect as the glob operator
 tt(*(D)), since files beginning with a dot are not special.  Care must be
 taken with expressions such as tt(rm ${(k)mapfile}), which will delete
 every file in the current directory without the usual `tt(rm *)' test.

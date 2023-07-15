@@ -55,7 +55,7 @@ struct keymapname {
     HashNode next;	/* next in the hash chain */
     char *nam;		/* name of the keymap */
     int flags;		/* various flags (see below) */
-    Keymap keymap;	/* the keymap itsef */
+    Keymap keymap;	/* the keymap itself */
 };
 
 /* Can't be deleted (.safe) */
@@ -155,7 +155,7 @@ createkeymapnamtab(void)
     keymapnamtab = newhashtable(7, "keymapnamtab", NULL);
 
     keymapnamtab->hash        = hasher;
-    keymapnamtab->emptytable  = emptyhashtable;
+    keymapnamtab->emptytable  = emptykeymapnamtab;
     keymapnamtab->filltable   = NULL;
     keymapnamtab->cmpnodes    = strcmp;
     keymapnamtab->addnode     = addhashnode;
@@ -178,6 +178,26 @@ makekeymapnamnode(Keymap keymap)
     return kmn;
 }
 
+/**/
+static void
+emptykeymapnamtab(HashTable ht)
+{
+    struct hashnode *hn, *hp;
+    int i;
+
+    for (i = 0; i < ht->hsize; i++) {
+	for (hn = ht->nodes[i]; hn;) {
+	    KeymapName kmn = (KeymapName) hn;
+	    hp = hn->next;
+	    zsfree(kmn->nam);
+	    unrefkeymap(kmn->keymap);
+	    zfree(kmn, sizeof(*kmn));
+	    hn = hp;
+	}
+	ht->nodes[i] = NULL;
+    }
+    ht->ct = 0;
+}
 
 /*
  * Reference a keymap from a keymapname.
@@ -404,7 +424,7 @@ scankeys(HashNode hn, UNUSED(int flags))
 /**************************/
 
 /**/
-Keymap
+mod_export Keymap
 openkeymap(char *name)
 {
     KeymapName n = (KeymapName) keymapnamtab->getnode(keymapnamtab, name);

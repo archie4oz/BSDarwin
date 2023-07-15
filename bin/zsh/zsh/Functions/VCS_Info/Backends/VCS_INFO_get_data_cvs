@@ -5,11 +5,8 @@
 setopt localoptions NO_shwordsplit
 local cvsbranch cvsbase
 
-cvsbase="."
-while [[ -d "${cvsbase}/../CVS" ]]; do
-    cvsbase="${cvsbase}/.."
-done
-cvsbase=${cvsbase:P}
+cvsbase="${vcs_comm[basedir]}"
+# VCS_INFO_detect_cvs ensured that ./CVS/Repository exists.
 cvsbranch=$(< ./CVS/Repository)
 rrn=${cvsbase:t}
 cvsbranch=${cvsbranch##${rrn}/}

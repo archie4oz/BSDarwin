@@ -58,3 +58,55 @@
 *?*
 F:Check that a history bug introduced by workers/34160 is working again.
 # Discarded line of error output consumes prompts printed by "zsh -i".
+
+ $ZTST_testdir/../Src/zsh -fis <<<'
+ echo /my/path/for/testing
+ echo !1:1:h10
+ echo !1:1:h3
+ echo !1:1:h2
+ echo !1:1:h1
+ echo !1:1:t10
+ echo !1:1:t3
+ echo !1:1:t2
+ echo !1:1:t1
+ echo !1:1:t3:h2' 2>/dev/null
+0:Modifiers :h and :t with arguments
+>/my/path/for/testing
+>/my/path/for/testing
+>/my/path
+>/my
+>/
+>/my/path/for/testing
+>path/for/testing
+>for/testing
+>testing
+>path/for
+
+ $ZTST_testdir/../Src/zsh -fis <<<'
+ echo /my/path/for/testing
+ echo !1:1:P' 2>/dev/null
+0:Modifier :P
+>/my/path/for/testing
+>/my/path/for/testing
+
+ $ZTST_testdir/../Src/zsh -fgis <<<'
+ SAVEHIST=7
+ print -rs "one\\"
+ print -rs "two\\\\"
+ print -rs "three\\\\\\"
+ print -rs "four\\\\\\\\"
+ print -rs "five\\\\\\\\\\"
+ print -s  "while false\ndo\ntrue\\\\\n && break\ndone"
+ print -s  "echo one\\\\\ntwo"
+ fc -W hist
+ fc -p -R hist
+ fc -l
+ rm hist' 2>/dev/null
+0:Lines ending in backslash saved and restored to history
+>    1  one\
+>    2  two\\
+>    3  three\\\
+>    4  four\\\\
+>    5  five\\\\\
+>    6  while false\ndo\ntrue\\n && break\ndone
+>    7  echo one\\ntwo

@@ -44,7 +44,11 @@
 #endif
 #endif
 
-/* what level of localness we are at */
+/* What level of localness we are at.
+ *
+ * Hand-wavingly, this is incremented at every function call and decremented
+ * at every function return.  See startparamscope().
+ */
  
 /**/
 mod_export int locallevel;
@@ -59,7 +63,6 @@ char **pparams,		/* $argv        */
      **mailpath,	/* $mailpath    */
      **manpath,		/* $manpath     */
      **psvar,		/* $psvar       */
-     **watch,		/* $watch       */
      **zsh_eval_context; /* $zsh_eval_context */
 /**/
 mod_export
@@ -94,8 +97,10 @@ char *ifs,		/* $IFS         */
      *pwd;		/* $PWD         */
 
 /**/
-mod_export
-zlong lastval,		/* $?           */
+mod_export volatile zlong
+     lastval;		/* $?           */
+/**/
+mod_export zlong
      mypid,		/* $$           */
      lastpid,		/* $!           */
      zterm_columns,	/* $COLUMNS     */
@@ -188,6 +193,10 @@ mod_export const struct gsu_hash stdhash_gsu =
 mod_export const struct gsu_hash nullsethash_gsu =
 { hashgetfn, nullsethashfn, nullunsetfn };
 
+/**/
+mod_export const struct gsu_scalar colonarr_gsu =
+{ colonarrgetfn, colonarrsetfn, stdunsetfn };
+
 
 /* Non standard methods (not exported) */
 static const struct gsu_integer pound_gsu =
@@ -252,9 +261,6 @@ static const struct gsu_integer varint_readonly_gsu =
 { intvargetfn, nullintsetfn, stdunsetfn };
 static const struct gsu_integer zlevar_gsu =
 { intvargetfn, zlevarsetfn, stdunsetfn };
-
-static const struct gsu_scalar colonarr_gsu =
-{ colonarrgetfn, colonarrsetfn, stdunsetfn };
 
 static const struct gsu_integer argc_gsu =
 { poundgetfn, nullintsetfn, stdunsetfn };
@@ -392,7 +398,6 @@ IPDEF8("CDPATH", &cdpath, "cdpath", PM_TIED),
 IPDEF8("FIGNORE", &fignore, "fignore", PM_TIED),
 IPDEF8("FPATH", &fpath, "fpath", PM_TIED),
 IPDEF8("MAILPATH", &mailpath, "mailpath", PM_TIED),
-IPDEF8("WATCH", &watch, "watch", PM_TIED),
 IPDEF8("PATH", &path, "path", PM_RESTRICTED|PM_TIED),
 IPDEF8("PSVAR", &psvar, "psvar", PM_TIED),
 IPDEF8("ZSH_EVAL_CONTEXT", &zsh_eval_context, "zsh_eval_context", PM_READONLY_SPECIAL|PM_TIED),
@@ -424,7 +429,6 @@ IPDEF9("fpath", &fpath, "FPATH", PM_TIED),
 IPDEF9("mailpath", &mailpath, "MAILPATH", PM_TIED),
 IPDEF9("manpath", &manpath, "MANPATH", PM_TIED),
 IPDEF9("psvar", &psvar, "PSVAR", PM_TIED),
-IPDEF9("watch", &watch, "WATCH", PM_TIED),
 
 IPDEF9("zsh_eval_context", &zsh_eval_context, "ZSH_EVAL_CONTEXT", PM_TIED|PM_READONLY_SPECIAL),
 
@@ -447,7 +451,6 @@ IPDEF8("CDPATH", &cdpath, NULL, 0),
 IPDEF8("FIGNORE", &fignore, NULL, 0),
 IPDEF8("FPATH", &fpath, NULL, 0),
 IPDEF8("MAILPATH", &mailpath, NULL, 0),
-IPDEF8("WATCH", &watch, NULL, 0),
 IPDEF8("PATH", &path, NULL, PM_RESTRICTED),
 IPDEF8("PSVAR", &psvar, NULL, 0),
 IPDEF8("ZSH_EVAL_CONTEXT", &zsh_eval_context, NULL, PM_READONLY_SPECIAL),
@@ -474,7 +477,13 @@ static initparam argvparam_pm = IPDEF9("", &pparams, NULL, \
 
 static Param argvparam;
 
-/* hash table containing the parameters */
+/* "parameter table" - hash table containing the parameters
+ *
+ * realparamtab always points to the shell's global table.  paramtab is sometimes
+ * temporarily changed to point at another table, while dealing with the keys
+ * of an associative array (for example, see makecompparams() which initializes
+ * the associative array ${compstate}).
+ */
  
 /**/
 mod_export HashTable paramtab, realparamtab;
@@ -749,7 +758,7 @@ split_env_string(char *env, char **name, char **value)
  */
 static int dontimport(int flags)
 {
-    /* If explicitly marked as don't export */
+    /* If explicitly marked as don't import */
     if (flags & PM_DONTIMPORT)
 	return 1;
     /* If value already exported */
@@ -809,7 +818,6 @@ createparamtable(void)
      * given them in the environment.                           */
     opts[ALLEXPORT] = 0;
     setiparam("MAILCHECK", 60);
-    setiparam("LOGCHECK", 60);
     setiparam("KEYTIMEOUT", 40);
     setiparam("LISTMAX", 100);
     /*
@@ -824,16 +832,18 @@ createparamtable(void)
      */
     setsparam("TMPPREFIX", ztrdup_metafy(DEFAULT_TMPPREFIX));
     setsparam("TIMEFMT", ztrdup_metafy(DEFAULT_TIMEFMT));
-    setsparam("WATCHFMT", ztrdup_metafy(default_watchfmt));
 
     hostnam = (char *)zalloc(256);
     gethostname(hostnam, 256);
     setsparam("HOST", ztrdup_metafy(hostnam));
     zfree(hostnam, 256);
 
-    setsparam("LOGNAME",
-	      ztrdup_metafy((str = getlogin()) && *str ?
-			    str : cached_username));
+    setsparam("LOGNAME", ztrdup_metafy(
+#ifndef DISABLE_DYNAMIC_NSS
+			(str = getlogin()) && *str ?  str :
+#endif
+				cached_username
+			));
 
 #if !defined(HAVE_PUTENV) && !defined(USE_SET_UNSET_ENV)
     /* Copy the environment variables we are inheriting to dynamic *
@@ -998,6 +1008,11 @@ createparam(char *name, int flags)
 		(oldpm->node.flags & PM_SPECIAL) ||
 		/* POSIXBUILTINS horror: we need to retain 'export' flags */
 		(isset(POSIXBUILTINS) && (oldpm->node.flags & PM_EXPORTED))) {
+		if (oldpm->node.flags & PM_RO_BY_DESIGN) {
+		    zerr("%s: can't change parameter attribute",
+			 name);
+		    return NULL;
+		}
 		oldpm->node.flags &= ~PM_UNSET;
 		if ((oldpm->node.flags & PM_SPECIAL) && oldpm->ename) {
 		    Param altpm =
@@ -1124,8 +1139,10 @@ copyparam(Param tpm, Param pm, int fakecopy)
     tpm->base = pm->base;
     tpm->width = pm->width;
     tpm->level = pm->level;
-    if (!fakecopy)
+    if (!fakecopy) {
+	tpm->old = pm->old;
 	tpm->node.flags &= ~PM_SPECIAL;
+    }
     switch (PM_TYPE(pm->node.flags)) {
     case PM_SCALAR:
 	tpm->u.str = ztrdup(pm->gsu.s->getfn(pm));
@@ -2081,7 +2098,8 @@ fetchvalue(Value v, char **pptr, int bracks, int flags)
 	if (sav)
 	    *s = sav;
 	*pptr = s;
-	if (!pm || (pm->node.flags & PM_UNSET))
+	if (!pm || ((pm->node.flags & PM_UNSET) &&
+		    !(pm->node.flags & PM_DECLARED)))
 	    return NULL;
 	if (v)
 	    memset(v, 0, sizeof(*v));
@@ -2201,10 +2219,10 @@ getstrvalue(Value v)
 
     if (v->flags & VALFLAG_SUBST) {
 	if (v->pm->node.flags & (PM_LEFT|PM_RIGHT_B|PM_RIGHT_Z)) {
-	    unsigned int fwidth = v->pm->width ? v->pm->width : MB_METASTRLEN(s);
+	    size_t fwidth = v->pm->width ? (unsigned int)v->pm->width : MB_METASTRLEN(s);
 	    switch (v->pm->node.flags & (PM_LEFT | PM_RIGHT_B | PM_RIGHT_Z)) {
 		char *t, *tend;
-		unsigned int t0;
+		size_t t0;
 
 	    case PM_LEFT:
 	    case PM_LEFT | PM_RIGHT_Z:
@@ -2585,7 +2603,7 @@ assignstrvalue(Value v, char *val, int flags)
 		Param pm = v->pm;
                 /* Size doesn't change, can limit actions to only
                  * overwriting bytes in already allocated string */
-                strncpy(z + v->start, val, vlen);
+		memcpy(z + v->start, val, vlen);
 		/* Implement remainder of strsetfn */
 		if (!(pm->node.flags & PM_HASHELEM) &&
 		    ((pm->node.flags & PM_NAMEDDIR) ||
@@ -3043,6 +3061,7 @@ assignsparam(char *s, char *val, int flags)
 	     * Don't warn about anything.
 	     */
 	    flags &= ~ASSPM_WARN;
+	    v->pm->node.flags &= ~PM_DEFAULTED;
 	}
 	*ss = '[';
 	v = NULL;
@@ -3068,6 +3087,7 @@ assignsparam(char *s, char *val, int flags)
     }
     if (flags & ASSPM_WARN)
 	check_warn_pm(v->pm, "scalar", created, 1);
+    v->pm->node.flags &= ~PM_DEFAULTED;
     if (flags & ASSPM_AUGMENT) {
 	if (v->start == 0 && v->end == -1) {
 	    switch (PM_TYPE(v->pm->node.flags)) {
@@ -3220,6 +3240,7 @@ assignaparam(char *s, char **val, int flags)
 
     if (flags & ASSPM_WARN)
 	check_warn_pm(v->pm, "array", created, may_warn_about_nested_vars);
+    v->pm->node.flags &= ~PM_DEFAULTED;
 
     /*
      * At this point, we may have array entries consisting of
@@ -3432,6 +3453,7 @@ sethparam(char *s, char **val)
 	    return NULL;
 	}
     check_warn_pm(v->pm, "associative array", checkcreate, 1);
+    v->pm->node.flags &= ~PM_DEFAULTED;
     setarrvalue(v, val);
     unqueue_signals();
     return v->pm;
@@ -3503,6 +3525,7 @@ assignnparam(char *s, mnumber val, int flags)
 	if (flags & ASSPM_WARN)
 	    check_warn_pm(v->pm, "numeric", 0, 1);
     }
+    v->pm->node.flags &= ~PM_DEFAULTED;
     setnumvalue(v, val);
     unqueue_signals();
     return v->pm;
@@ -3546,7 +3569,7 @@ setiparam(char *s, zlong val)
 
 /*
  * Set an integer parameter without forcing creation of an integer type.
- * This is useful if the integer is going to be set to a parmaeter which
+ * This is useful if the integer is going to be set to a parameter which
  * would usually be scalar but may not exist.
  */
 
@@ -3607,6 +3630,7 @@ unsetparam_pm(Param pm, int altflag, int exp)
     else
 	altremove = NULL;
 
+    pm->node.flags &= ~PM_DECLARED;	/* like ksh, not like bash */
     if (!(pm->node.flags & PM_UNSET))
 	pm->gsu.s->unsetfn(pm, exp);
     if (pm->env)
@@ -3617,10 +3641,18 @@ unsetparam_pm(Param pm, int altflag, int exp)
 	altpm = (Param) paramtab->getnode(paramtab, altremove);
 	/* tied parameters are at the same local level as each other */
 	oldpm = NULL;
-	while (altpm && altpm->level > pm->level) {
-	    /* param under alternate name hidden by a local */
-	    oldpm = altpm;
-	    altpm = altpm->old;
+	/*
+	 * Look for param under alternate name hidden by a local.
+	 * If this parameter is special, however, the visible
+	 * parameter is the special and the hidden one is keeping
+	 * an old value --- we just mark the visible one as unset.
+	 */
+	if (altpm && !(altpm->node.flags & PM_SPECIAL))
+	{
+	    while (altpm && altpm->level > pm->level) {
+		oldpm = altpm;
+		altpm = altpm->old;
+	    }
 	}
 	if (altpm) {
 	    if (oldpm && !altpm->level) {
@@ -3632,6 +3664,8 @@ unsetparam_pm(Param pm, int altflag, int exp)
 	}
 
 	zsfree(altremove);
+	if (!(pm->node.flags & PM_SPECIAL))
+	    pm->gsu.s = &stdscalar_gsu;
     }
 
     /*
@@ -4054,7 +4088,7 @@ arrvarsetfn(Param pm, char **x)
 }
 
 /**/
-char *
+mod_export char *
 colonarrgetfn(Param pm)
 {
     char ***dptr = (char ***)pm->u.data;
@@ -4062,7 +4096,7 @@ colonarrgetfn(Param pm)
 }
 
 /**/
-void
+mod_export void
 colonarrsetfn(Param pm, char *x)
 {
     char ***dptr = (char ***)pm->u.data;
@@ -4096,6 +4130,11 @@ tiedarrsetfn(Param pm, char *x)
 
     if (*dptr->arrptr)
 	freearray(*dptr->arrptr);
+    else if (pm->ename) {
+	Param altpm = (Param) paramtab->getnode(paramtab, pm->ename);
+	if (altpm)
+	    altpm->node.flags &= ~PM_DEFAULTED;
+    }
     if (x) {
 	char sepbuf[3];
 	if (imeta(dptr->joinchar))
@@ -4394,7 +4433,7 @@ usernamegetfn(UNUSED(Param pm))
 void
 usernamesetfn(UNUSED(Param pm), char *x)
 {
-#if defined(HAVE_SETUID) && defined(HAVE_GETPWNAM)
+#if defined(HAVE_SETUID) && defined(USE_GETPWNAM)
     struct passwd *pswd;
 
     if (x && (pswd = getpwnam(x)) && (pswd->pw_uid != cached_uid)) {
@@ -4411,7 +4450,7 @@ usernamesetfn(UNUSED(Param pm), char *x)
 	    cached_uid = pswd->pw_uid;
 	}
     }
-#endif /* HAVE_SETUID && HAVE_GETPWNAM */
+#endif /* HAVE_SETUID && USE_GETPWNAM */
     zsfree(x);
 }
 
@@ -4555,6 +4594,19 @@ static struct localename {
     {NULL, 0}
 };
 
+/* On some systems (at least on NetBSD-9), when LC_CTYPE changes,
+ * global variables (type mbstate_t) used by mbrtowc() etc. need be
+ * reset by clear_mbstate() */
+
+/**/
+static void
+clear_mbstate(void) {
+#ifdef MULTIBYTE_SUPPORT
+    mb_charinit();	/* utils.c */
+    clear_shiftstate();	/* pattern.c */
+#endif
+}
+
 /**/
 static void
 setlang(char *x)
@@ -4577,6 +4629,7 @@ setlang(char *x)
      * that case.
      */
     setlocale(LC_ALL, x ? unmeta(x) : "");
+    clear_mbstate();
     queue_signals();
     for (ln = lc_names; ln->name; ln++)
 	if ((x = getsparam_u(ln->name)) && *x)
@@ -4602,8 +4655,10 @@ lc_allsetfn(Param pm, char *x)
 	    unqueue_signals();
 	}
     }
-    else
+    else {
 	setlocale(LC_ALL, unmeta(x));
+	clear_mbstate();
+    }
 }
 
 /**/
@@ -4640,6 +4695,7 @@ lcsetfn(Param pm, char *x)
 		setlocale(ln->category, unmeta(x));
     }
     unqueue_signals();
+    clear_mbstate();	/* LC_CTYPE may have changed */
 }
 #endif /* USE_LOCALE */
 
@@ -5015,6 +5071,7 @@ arrfixenv(char *s, char **t)
 
     if (isset(ALLEXPORT))
 	pm->node.flags |= PM_EXPORTED;
+    pm->node.flags &= ~PM_DEFAULTED;
 
     /*
      * Do not "fix" parameters that were not exported
@@ -5549,6 +5606,14 @@ startparamscope(void)
     locallevel++;
 }
 
+#ifdef USE_LOCALE
+/*
+ * Flag that one of the special LC_ functions or LANG changed on scope
+ * end
+ */
+static int lc_update_needed;
+#endif /* USE_LOCALE */
+
 /* End a parameter scope: delete the parameters local to the scope. */
 
 /**/
@@ -5559,7 +5624,29 @@ endparamscope(void)
     locallevel--;
     /* This pops anything from a higher locallevel */
     saveandpophiststack(0, HFILE_USE_OPTIONS);
+#ifdef USE_LOCALE
+    lc_update_needed = 0;
+#endif
     scanhashtable(paramtab, 0, 0, 0, scanendscope, 0);
+#ifdef USE_LOCALE
+    if (lc_update_needed)
+    {
+	/* Locale changed --- ensure it is restored. */
+	char *val;
+	if ((val = getsparam_u("LC_ALL")) && *val) {
+	    setlocale(LC_ALL, val);
+	} else {
+	    struct localename *ln;
+	    if ((val = getsparam_u("LANG")) && *val)
+		setlang(val);
+	    for (ln = lc_names; ln->name; ln++) {
+		if ((val = getsparam_u(ln->name)) && *val)
+		    setlocale(ln->category, val);
+	    }
+	}
+	clear_mbstate();    /* LC_CTYPE may have changed */
+    }
+#endif /* USE_LOCALE */
     unqueue_signals();
 }
 
@@ -5580,6 +5667,11 @@ scanendscope(HashNode hn, UNUSED(int flags))
 	     */
 	    Param tpm = pm->old;
 
+#ifdef USE_LOCALE
+	    if (!strncmp(pm->node.nam, "LC_", 3) ||
+		!strcmp(pm->node.nam, "LANG"))
+		lc_update_needed = 1;
+#endif
 	    if (!strcmp(pm->node.nam, "SECONDS"))
 	    {
 		setsecondstype(pm, PM_TYPE(tpm->node.flags), PM_TYPE(pm->node.flags));
@@ -5785,8 +5877,9 @@ printparamnode(HashNode hn, int printflags)
     Param peer = NULL;
 
     if (p->node.flags & PM_UNSET) {
-	if (printflags & (PRINT_POSIX_READONLY|PRINT_POSIX_EXPORT) &&
-	    p->node.flags & (PM_READONLY|PM_EXPORTED)) {
+	if ((printflags & (PRINT_POSIX_READONLY|PRINT_POSIX_EXPORT) &&
+	     p->node.flags & (PM_READONLY|PM_EXPORTED)) ||
+	    (p->node.flags & PM_DEFAULTED) == PM_DEFAULTED) {
 	    /*
 	     * Special POSIX rules: show the parameter as readonly/exported
 	     * even though it's unset, but with no value.
@@ -5813,8 +5906,12 @@ printparamnode(HashNode hn, int printflags)
 	 * don't.
 	 */
 	if (printflags & PRINT_POSIX_EXPORT) {
+	    if (!(p->node.flags & PM_EXPORTED))
+		return;
 	    printf("export ");
 	} else if (printflags & PRINT_POSIX_READONLY) {
+	    if (!(p->node.flags & PM_READONLY))
+		return;
 	    printf("readonly ");
 	} else if (locallevel && p->level >= locallevel) {
 	    printf("typeset ");	    /* printf("local "); */
@@ -5858,7 +5955,7 @@ printparamnode(HashNode hn, int printflags)
 		    doneminus = 0;
 		}
 		if ((pmptr->flags & PMTF_USE_WIDTH) && p->width) {
-		    printf("%d ", p->width);
+		    printf("%u ", p->width);
 		    doneminus = 0;
 		}
 	    }

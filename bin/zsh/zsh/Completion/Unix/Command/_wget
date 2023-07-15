@@ -16,6 +16,7 @@ _arguments -C -s \
   '*-n+[turn off flags]:flags:->noflags' \
   '--report-speed=:type:(bits)' \
   '(--input-file -i)'{--input-file=,-i+}'[specify input file]:file containing URLs:_files' \
+  '--input-metalink=[download files covered in local Metalink file]:file:_files' \
   '(--force-html -F)'{--force-html,-F}'[treat input file as html]' \
   '(--base -B)'{--base=,-B+}'[prepend URL to relative links]:base URL:_urls' \
   '--config=[specify config file]:config file:_files' \
@@ -33,6 +34,8 @@ _arguments -C -s \
   '(--server-response -S)'{--server-response,-S}'[print server response]' \
   "--spider[don't download anything]" \
   '(--timeout -T)'{--timeout=,-T+}'[set all timeout values]:timeout (seconds)' \
+  '--dns-servers=[specify DNS servers to query]:DNS server:_sequence _hosts' \
+  '--bind-dns-address=[bind DNS resolver to specified address]:hostname or IP on local host' \
   '(--timeout -T)--dns-timeout=[set the DNS lookup timeout]:DNS lookup timeout (seconds)' \
   '(--timeout -T)--connect-timeout=[set the connect timeout]:connect timeout (seconds)' \
   '(--timeout -T)--read-timeout=[set the read timeout]:read timeout (seconds)' \
@@ -57,7 +60,11 @@ _arguments -C -s \
   '--local-encoding=[specify local encoding for IRIs]:encoding' \
   '--remote-encoding=[specify default remote encoding]:encoding' \
   '--unlink[remove file before clobber]' \
-  '--no-xattr[turn off storage of metadata in extended file attributes]' \
+  '--keep-badhash[Keep files with checksum mismatch (append .badhash)]' \
+  '--metalink-index=[metalink application/metalink4+xml metaurl ordinal]:number' \
+  '--metalink-over-http[use Metalink metadata from HTTP response headers]' \
+  '--preferred-location[preferred location for Metalink resources]' \
+  '--xattr[turn on storage of metadata in extended file attributes]' \
   '(-nd --no-directories)'{-nd,--no-directories}"[don't create directories]" \
   '(--force-directories -x)'{--force-directories,-x}'[force creation of directories]' \
   '(-nH --no-host-directories)'{-nH,--no-host-directories}"[don't create host directories]" \
@@ -132,7 +139,7 @@ _arguments -C -s \
   '(--reject -R)'{--reject=,-R+}'[specify rejected extensions]:extensions' \
   --{accept,reject}-regex=:regex '--regex-type=:regex type:(posix pcre)' \
   '(--domains -D)'{--domains=,-D+}'[specify accepted domains]:domains:_domains' \
-  '--exclude-domains=:rejected domains:_domains' \
+  '--exclude-domains=:rejected domain:_sequence _domains' \
   '--follow-ftp' \
   '--follow-tags=:HTML tags:' \
   '--ignore-tags=[specify ignored HTML tags]:HTML tags' \

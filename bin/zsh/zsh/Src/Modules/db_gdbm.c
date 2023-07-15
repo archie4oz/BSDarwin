@@ -233,7 +233,7 @@ bin_zuntie(char *nam, char **args, Options ops, UNUSED(int func))
 
 /**/
 static int
-bin_zgdbmpath(char *nam, char **args, Options ops, UNUSED(int func))
+bin_zgdbmpath(char *nam, char **args, UNUSED(Options ops), UNUSED(int func))
 {
     Param pm;
     char *pmname;
@@ -332,6 +332,8 @@ gdbmgetfn(Param pm)
 
         /* Can return pointer, correctly saved inside hash */
         return pm->u.str;
+    } else {
+      pm->node.flags |= PM_DEFAULTED;
     }
 
     /* Free key */
@@ -766,7 +768,7 @@ static int remove_tied_name( const char *name ) {
 
 /*
  * Unmetafy that:
- * - duplicates bufer to work on it,
+ * - duplicates buffer to work on it,
  * - does zalloc of exact size for the new string,
  * - restores work buffer to original content, to restore strlen
  */

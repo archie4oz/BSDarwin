@@ -44,7 +44,7 @@ case "$service" in
       '*-dispose:GIF disposal method:((0:no\ disposal 1\:don'\''t\ dispose\ between\ frames 2\:overwrite\ frame\ with\ background\ color 3\:overwrite\ with\ previous\ frame))' \
       '*-dither[apply dithering]' \
       '*-edge:edge detection factor (0.0 - 99.9%%)' \
-      '*-endian:image endianess:(MSB LSB)' \
+      '*-endian:image endianness:(MSB LSB)' \
       '*+endian' \
       '*-enhance[enhance noisy image]' \
       '*-filter:filter type for resizing:(Point Box Triangle Hermite Hanning Hamming Blackman Gaussian Quadratic Cubic Catrom Mitchell Lanczos Bessel Sinc)' \
@@ -166,7 +166,7 @@ case "$service" in
       '-descend[descend window hierarchy]' \
       '-dispose:GIF disposal method:((0:no\ disposal 1\:don'\''t\ dispose\ between\ frames 2\:overwrite\ frame\ with\ background\ color 3\:overwrite\ with\ previous\ frame))' \
       '-dither[apply dithering]' \
-      '(+endian)-endian:image endianess:(MSB LSB)' \
+      '(+endian)-endian:image endianness:(MSB LSB)' \
       '(-endian)+endian' \
       '-frame[include window manager frame]' \
       '(- *)-help[display help information]' \
@@ -218,7 +218,7 @@ case "$service" in
       '*-dither[apply dithering]' \
       '*+dither[render Postscript without aliasing]' \
       '*-draw:drawing primitive:compadd -S "\\ " - rectangle circle ellipse polygon color matte text image' \
-      '*-endian:image endianess:(MSB LSB)' \
+      '*-endian:image endianness:(MSB LSB)' \
       '*+endian' \
       '*-filter:filter type for resizing:(Point Box Triangle Hermite Hanning Hamming Blackman Gaussian Quadratic Cubic Catrom Mitchell Lanczos Bessel Sinc)' \
       '*-frame[draw frame around image]' \
@@ -262,7 +262,10 @@ case "$service" in
     _arguments -C -M 'm:{a-z}={A-Z}' \
       '-adjoin[join images]' \
       '-affine[drawing transform matrix]:matrix' \
+      '-alpha[set the alpha channel]:alpha' \
       '-antialias[remove pixel aliasing]' \
+      '-authenticate[decrypt image with specified password]:password' \
+      '-attenuate[lessen (or intensify) when adding noise to an image]:value' \
       '-append[append image sequence]' \
       '-average[average image sequence]' \
       '-background[specify background color]:color:_x_color' \
@@ -297,10 +300,11 @@ case "$service" in
       '-draw:drawing primitive:compadd -S "\\ " - rectangle circle ellipse polygon color matte text image' \
       '-edge:edge detection factor (0.0 - 99.9%%)' \
       '-emboss[emboss image]' \
-      '(+endian)-endian:image endianess:(MSB LSB)' \
+      '(+endian)-endian:image endianness:(MSB LSB)' \
       '(-endian)+endian' \
       '-enhance[enhance image]' \
       '-equalize[histogram equalization]' \
+      '-features[analyze image features (e.g. contrast, correlation)]:distance' \
       '-fill[specify color to use when filling a graphic primitive]:color:_x_color' \
       '-filter:filter type for resizing:(Point Box Triangle Hermite Hanning Hamming Blackman Gaussian Quadratic Cubic Catrom Mitchell Lanczos Bessel Sinc)' \
       '-flatten[flatten a sequence of images]' \
@@ -315,12 +319,14 @@ case "$service" in
       '-gravity:image gravity:(Center North NorthEast East SouthEast South SouthWest West NorthWest)' \
       '-implode:implosion factor (0.0 - 99.9%%)' \
       '-interlace:interlacing scheme:(None Line Plane Partition)' \
+      '-interpolative-resize[resize image using point sampled interpolation]:geometry' \
       '-label:label string' \
       '-layer:layer type:(Red Green Blue Matte)' \
       '-linewidth:line width' \
       '-loop:number of iterations (GIF animation)' \
       '-map[single image colormap file]:picture file for colors:_imagemagick' \
       '+map[all images colormap file]:picture file for colors:_imagemagick' \
+      '-mask[associate a mask with the image]:file:_files' \
       '-matte[store matte channel]' \
       '-modulate:<brightness>,<saturation>,<hue>' \
       '-monochrome[transform to black and white]' \
@@ -352,6 +358,7 @@ case "$service" in
       '-size:image size (<width>x<height>+<offset>)' \
       '-solarize:solarization threshold' \
       '-spread:neighborhood size' \
+      '-support[specify resize support]:support (>1.0 is blurry, < 1.0 is sharp)' \
       '-swirl:swirl tightness' \
       '-texture:background texture image:_imagemagick' \
       '-threshold:threshold for maximum intensity' \
@@ -511,7 +518,7 @@ case "$service" in
       '-file:output file:_files' \
       '-get[get files]' \
       '-port:port: _ports' \
-      '-proxy:host of proxy ftp deamon:_hosts' \
+      '-proxy:host of proxy ftp daemon:_hosts' \
       '-print[print files]' \
       '-prune[process files from remote directory]' \
       '-put[put files]' \

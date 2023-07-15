@@ -80,11 +80,6 @@
 /**/
 int SHIN;
 
-/* buffered shell input for non-interactive shells */
-
-/**/
-FILE *bshin;
-
 /* != 0 means we are reading input from a string */
  
 /**/
@@ -129,7 +124,145 @@ static struct instacks *instack, *instacktop;
 
 static int instacksz = INSTACK_INITIAL;
 
-/* Read a line from bshin.  Convert tokens and   *
+/* Size of buffer for non-interactive command input */
+
+#define SHINBUFSIZE 8192
+
+/* Input buffer for non-interactive command input */
+static char *shinbuffer;
+
+/* Pointer into shinbuffer */
+static char *shinbufptr;
+
+/* End of contents read into shinbuffer */
+static char *shinbufendptr;
+
+/* Entry on SHIN buffer save stack */
+struct shinsaveentry {
+    /* Next entry on stack */
+    struct shinsaveentry *next;
+    /* Saved shinbuffer */
+    char *buffer;
+    /* Saved shinbufptr */
+    char *ptr;
+    /* Saved shinbufendptr */
+    char *endptr;
+};
+
+/* SHIN buffer save stack */
+static struct shinsaveentry *shinsavestack;
+
+/* Reset the input buffer for SHIN, discarding any pending input */
+
+/**/
+void
+shinbufreset(void)
+{
+    shinbufendptr = shinbufptr = shinbuffer;
+}
+
+/* Allocate a new shinbuffer
+ *
+ * Only called at shell initialisation and when saving on the stack.
+ */
+
+/**/
+void
+shinbufalloc(void)
+{
+    shinbuffer = zalloc(SHINBUFSIZE);
+    shinbufreset();
+}
+
+/* Save entry on SHIN buffer save stack */
+
+/**/
+void
+shinbufsave(void)
+{
+    struct shinsaveentry *entry =
+	(struct shinsaveentry *)zalloc(sizeof(struct shinsaveentry));
+
+    entry->next = shinsavestack;
+    entry->buffer = shinbuffer;
+    entry->ptr = shinbufptr;
+    entry->endptr = shinbufendptr;
+
+    shinsavestack = entry;
+
+    shinbufalloc();
+}
+
+/* Restore entry from SHIN buffer save stack */
+
+/**/
+void
+shinbufrestore(void)
+{
+    struct shinsaveentry *entry = shinsavestack;
+
+    zfree(shinbuffer, SHINBUFSIZE);
+
+    shinbuffer = entry->buffer;
+    shinbufptr = entry->ptr;
+    shinbufendptr = entry->endptr;
+
+    shinsavestack = entry->next;
+    zfree(entry, sizeof(struct shinsaveentry));
+}
+
+/* Get a character from SHIN, -1 if none available */
+
+/**/
+static int
+shingetchar(void)
+{
+    int nread, rsize = isset(SHINSTDIN) ? 1 : SHINBUFSIZE;
+
+    if (shinbufptr < shinbufendptr)
+	return STOUC(*shinbufptr++);
+
+    shinbufreset();
+#ifdef USE_LSEEK
+    if (rsize == 1 && lseek(SHIN, 0, SEEK_CUR) != (off_t)-1)
+	rsize = SHINBUFSIZE;
+    if (rsize > 1) {
+	do {
+	    errno = 0;
+	    nread = read(SHIN, shinbuffer, rsize);
+	} while (nread < 0 && errno == EINTR);
+	if (nread <= 0)
+	    return -1;
+	if (isset(SHINSTDIN) &&
+	    (shinbufendptr = memchr(shinbuffer, '\n', nread))) {
+	    shinbufendptr++;
+	    rsize = (shinbufendptr - shinbuffer);
+	    if (nread > rsize &&
+		lseek(SHIN, -(nread - rsize), SEEK_CUR) < 0)
+		zerr("lseek(%d, %d): %e", SHIN, -(nread - rsize), errno);
+	} else
+	    shinbufendptr = shinbuffer + nread;
+	return STOUC(*shinbufptr++);
+    }
+#endif
+    for (;;) {
+       errno = 0;
+       nread = read(SHIN, shinbufendptr, 1);
+       if (nread > 0) {
+           /* Use line buffering (POSIX requirement) */
+           if (*shinbufendptr++ == '\n')
+               break;
+           if (shinbufendptr == shinbuffer + SHINBUFSIZE)
+               break;
+       } else if (nread == 0 || errno != EINTR)
+           break;
+    }
+    if (shinbufendptr == shinbuffer)
+        return -1;
+    return STOUC(*shinbufptr++);
+}
+
+/* Read a line from SHIN.  Convert tokens and   *
  * null characters to Meta c^32 character pairs. */
 
 /**/
@@ -147,11 +280,7 @@ shingetline(void)
     winch_unblock();
     dont_queue_signals();
     for (;;) {
-	/* Can't fgets() here because we need to accept '\0' bytes */
-	do {
-	    errno = 0;
-	    c = fgetc(bshin);
-	} while (c < 0 && errno == EINTR);
+	c = shingetchar();
 	if (c < 0 || c == '\n') {
 	    winch_block();
 	    restore_queue_signals(q);
@@ -495,9 +624,9 @@ stuff(char *fn)
 	zerr("can't open %s", fn);
 	return 1;
     }
-    fseek(in, 0, 2);
+    fseek(in, 0, SEEK_END);
     len = ftell(in);
-    fseek(in, 0, 0);
+    fseek(in, 0, SEEK_SET);
     buf = (char *)zalloc(len + 1);
     if (!(fread(buf, len, 1, in))) {
 	zerr("read error on %s", fn);

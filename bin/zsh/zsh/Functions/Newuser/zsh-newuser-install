@@ -627,7 +627,7 @@ Type:
 }
 
 
-# Print and despatch a submenu.
+# Print and dispatch a submenu.
 # The first argument is the title.  The remaining arguments
 # are pairs of descriptions and functions to execute.
 # There shouldn't be more than 9 entries.
@@ -899,7 +899,6 @@ __zni_options_config() {
   # The "no" prefix is used to indicate options on by default.
   __zni_apply_defaults -o autocd '' "Change directory given just path." \
     extendedglob '' "Use additional pattern matching features." \
-    appendhistory '' "Append new history lines instead of overwriting." \
     '!nomatch' '' "Unmatched patterns cause an error." \
     '!beep' '' "Beep on errors." \
     notify '' "Immediately report changes in background job status."

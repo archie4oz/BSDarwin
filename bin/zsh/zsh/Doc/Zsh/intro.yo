@@ -15,6 +15,9 @@ startlist()
 ifzshone(\
 list(em(zsh)          Zsh overview (this section))
 )\
+ifzshall(\
+list(em(zsh)          Zsh overview)
+)\
 list(em(zshroadmap)   Informal introduction to the manual)
 list(em(zshmisc)      Anything not fitting into the other sections)
 list(em(zshexpn)      Zsh command and parameter expansion)
@@ -42,7 +45,7 @@ zsh most closely resembles bf(ksh) but includes many enhancements.  It
 does not provide compatibility with POSIX or other shells in its
 default operating mode:  see
 ifnzman(the section noderef(Compatibility))\
-ifzman(the section Compatibility below).
+ifzman(the section `Compatibility' below).
 
 Zsh has command line editing, builtin spelling correction, programmable
 command completion, shell functions (with autoloading), a history

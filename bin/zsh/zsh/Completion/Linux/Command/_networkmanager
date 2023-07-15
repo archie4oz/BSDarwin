@@ -4,6 +4,7 @@
 
 _networkmanager() {
   local curcontext="$curcontext" state line
+  local nmcli="$words[1]"
 
   _arguments -C \
     '(-o -overview)-o'{,verview}'[overview mode (hide default values)]' \
@@ -107,10 +108,22 @@ _nm_connection_down() {
 }
 
 _nm_connection_modify() {
-  # TODO: add support for options and properties
-  _arguments \
+  local curcontext="$curcontext" ret=1
+  local -a state line expl properties
+
+  _arguments -A "-*" \
     "--temporary" \
-    "1:connection:_nm_connection_specs"
+    "1:connection:_nm_connection_specs" \
+    '2:option:->properties' \
+    '3:value' && ret=0
+
+  if [[ -n "$state" ]]; then
+    properties=( ${${(f)"$(_call_program properties $nmcli -t connection show $line[1])"}%%:*} )
+    _description properties expl property
+    _multi_parts "$expl[@]" . properties && ret=0
+  fi
+
+  return ret
 }
 
 _nm_connection_clone() {
@@ -231,7 +244,7 @@ _nm_device_wifi() {
   local curcontext="$curcontext" state line
 
   _arguments -C \
-    "1:command:(list connect hotspot rescan)" \
+    "1:command:(list connect hotspot rescan show-password)" \
     "*::arg:->args"
 
   case $line[1] in
@@ -239,12 +252,14 @@ _nm_device_wifi() {
     c*)  _nm_device_wifi_connect ;;
     ho*) _nm_device_wifi_hotspot ;;
     r*)  _nm_device_wifi_rescan ;;
+    s*)  _nm_device_wifi_show-password ;;
   esac
 }
 
 _nm_device_wifi_list() {
   # TODO: support bssid on its own
   _arguments \
+    '--rescan[force or disable network scan]:network scan:(yes no auto)' \
     "1: :(ifname)" \
     "2:interface:_nm_device_ifnames" \
     "3: :(bssid)" \
@@ -346,6 +361,12 @@ _nm_device_wifi_rescan() {
     "2:interface:_nm_device_ifnames" \
     "3: :(ssid)" \
     "4:ssid:_nm_device_wifi_ssids"
+}
+
+_nm_device_wifi_show-password() {
+  _arguments \
+    "1: :(ifname)" \
+    "2:interface:_nm_device_ifnames"
 }
 
 _nm_device_wifi_bssids() {

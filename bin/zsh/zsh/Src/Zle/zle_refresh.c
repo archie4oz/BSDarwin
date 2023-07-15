@@ -212,9 +212,9 @@ static zattr default_atr_on, special_atr_on;
 
 /*
  * Array of region highlights, no special termination.
- * The first element (0) always describes the region between
- * point and mark.  Any other elements are set by the user
- * via the parameter region_highlight.
+ * The first N_SPECIAL_HIGHLIGHTS elements describe special uses of
+ * highlighting, documented under N_SPECIAL_HIGHLIGHTS.
+ * Any other elements are set by the user via the parameter region_highlight.
  */
 
 /**/
@@ -255,7 +255,9 @@ int cost;
 #endif
 
 static const REFRESH_ELEMENT zr_cr = { ZWC('\r'), 0 };
+#ifdef MULTIBYTE_SUPPORT
 static const REFRESH_ELEMENT zr_dt = { ZWC('.'), 0 };
+#endif
 static const REFRESH_ELEMENT zr_nl = { ZWC('\n'), 0 };
 static const REFRESH_ELEMENT zr_sp = { ZWC(' '), 0 };
 static const REFRESH_ELEMENT zr_zr = { ZWC('\0'), 0 };
@@ -388,7 +390,7 @@ zle_free_highlight(void)
 
 /*
  * Interface to the region_highlight ZLE parameter.
- * Converts betwen a format like "P32 42 underline,bold" to
+ * Converts between a format like "P32 42 underline,bold" to
  * the format in the region_highlights variable.  Note that
  * the region_highlights variable stores the internal (point/mark)
  * region in element zero.
@@ -414,16 +416,19 @@ get_region_highlight(UNUSED(Param pm))
 	 arrsize--;
 	 rhp++, arrp++) {
 	char digbuf1[DIGBUFSIZE], digbuf2[DIGBUFSIZE];
-	int atrlen = 0, alloclen;
+	int atrlen, alloclen;
+	const char memo_equals[] = "memo=";
 
 	sprintf(digbuf1, "%d", rhp->start);
 	sprintf(digbuf2, "%d", rhp->end);
 
 	atrlen = output_highlight(rhp->atr, NULL);
 	alloclen = atrlen + strlen(digbuf1) + strlen(digbuf2) +
-	    3; /* 2 spaces, 1 0 */
+	    3; /* 2 spaces, 1 terminating NUL */
 	if (rhp->flags & ZRH_PREDISPLAY)
 	    alloclen += 2; /* "P " */
+	if (rhp->memo)
+	    alloclen += 1 /* space */ + strlen(memo_equals) + strlen(rhp->memo);
 	*arrp = (char *)zhalloc(alloclen * sizeof(char));
 	/*
 	 * On input we allow a space after the flags.
@@ -436,6 +441,12 @@ get_region_highlight(UNUSED(Param pm))
 		(rhp->flags & ZRH_PREDISPLAY) ? "P" : "",
 		digbuf1, digbuf2);
 	(void)output_highlight(rhp->atr, *arrp + strlen(*arrp));
+
+	if (rhp->memo) {
+	    strcat(*arrp, " ");
+	    strcat(*arrp, memo_equals);
+	    strcat(*arrp, rhp->memo);
+	}
     }
     *arrp = NULL;
     return retarr;
@@ -460,6 +471,8 @@ set_region_highlight(UNUSED(Param pm), char **aval)
 	/* no null termination, but include special highlighting at start */
 	int newsize = len + N_SPECIAL_HIGHLIGHTS;
 	int diffsize = newsize - n_region_highlights;
+
+	free_region_highlights_memos();
 	region_highlights = (struct region_highlight *)
 	    zrealloc(region_highlights,
 		     sizeof(struct region_highlight) * newsize);
@@ -476,6 +489,7 @@ set_region_highlight(UNUSED(Param pm), char **aval)
 	 *aval;
 	 rhp++, aval++) {
 	char *strp, *oldstrp;
+	const char memo_equals[] = "memo=";
 
 	oldstrp = *aval;
 	if (*oldstrp == 'P') {
@@ -502,7 +516,44 @@ set_region_highlight(UNUSED(Param pm), char **aval)
 	while (inblank(*strp))
 	    strp++;
 
-	match_highlight(strp, &rhp->atr);
+	strp = (char*) match_highlight(strp, &rhp->atr);
+
+	while (inblank(*strp))
+	    strp++;
+
+	if (strpfx(memo_equals, strp)) {
+	    const char *memo_start = strp + strlen(memo_equals);
+	    const char *i, *memo_end;
+
+	    /* 
+	     * Forward compatibility: end parsing at a comma or whitespace to
+	     * allow the following extensions:
+	     *
+	     * - A fifth field: "0 20 bold memo=foo bar".
+	     *
+	     * - Additional attributes in the fourth field: "0 20 bold memo=foo,bar"
+	     *   and "0 20 bold memo=foo\0bar".
+	     *
+	     * For similar reasons, we don't flag an error if the fourth field
+	     * doesn't start with "memo=" as we expect.
+	     */
+	    i = memo_start;
+
+	    /* ### TODO: Consider optimizing the common case that memo_start to
+	     *           end-of-string is entirely ASCII */
+	    while (1) {
+		int nbytes;
+		convchar_t c = unmeta_one(i, &nbytes);
+
+		if (c == '\0' || c == ',' || inblank(c)) {
+		    memo_end = i;
+		    break;
+		} else
+		    i += nbytes;
+	    }
+	    rhp->memo = ztrduppfx(memo_start, memo_end - memo_start);
+	} else
+	    rhp->memo = NULL;
     }
 
     freearray(av);
@@ -834,7 +885,7 @@ nextline(Rparams rpms, int wrapped)
 	    if (rpms->nvln != -1 && rpms->nvln != winh - 1
 		&& (numscrolls != onumscrolls - 1
 		    || rpms->nvln <= winh / 2))
-	        return 1;
+		return 1;
 	    numscrolls++;
 	    rpms->canscroll = winh / 2;
 	}
@@ -1151,20 +1202,20 @@ zrefresh(void)
 	resetneeded = 0;	/* unset */
 	oput_rpmpt = 0;		/* no right-prompt currently on screen */
 
-        if (!clearflag) {
-            if (tccan(TCCLEAREOD))
-                tcoutclear(TCCLEAREOD);
-            else
-                cleareol = 1;   /* request: clear to end of line */
+	if (!clearflag) {
+	    if (tccan(TCCLEAREOD))
+		tcoutclear(TCCLEAREOD);
+	    else
+		cleareol = 1;   /* request: clear to end of line */
 	    if (listshown > 0)
 		listshown = 0;
 	}
-        if (t0 > -1)
-            olnct = (t0 < winh) ? t0 : winh;
-        if (termflags & TERM_SHORT)
-            vcs = 0;
+	if (t0 > -1)
+	    olnct = (t0 < winh) ? t0 : winh;
+	if (termflags & TERM_SHORT)
+	    vcs = 0;
 	else if (!clearflag && lpromptbuf[0]) {
-            zputs(lpromptbuf, shout);
+	    zputs(lpromptbuf, shout);
 	    if (lpromptwof == winw)
 		zputs("\n", shout);	/* works with both hasam and !hasam */
 	} else {
@@ -1678,7 +1729,12 @@ zrefresh(void)
 
 	    moveto(0, winw - rprompt_off - rpromptw);
 	    zputs(rpromptbuf, shout);
-	    vcs = winw - rprompt_off;
+	    if (rprompt_off) {
+		vcs = winw - rprompt_off;
+	    } else {
+		zputc(&zr_cr);
+		vcs = 0;
+	    }
 	/* reset character attributes to that set by the main prompt */
 	    txtchange = pmpt_attr;
 	    /*
@@ -1885,7 +1941,7 @@ refreshline(int ln)
     if (hasam && vcs == winw) {
 	if (nbuf[vln] && nbuf[vln][vcs + 1].chr == ZWC('\n')) {
 	    vln++, vcs = 1;
-            if (nbuf[vln]  && nbuf[vln]->chr) {
+	    if (nbuf[vln]  && nbuf[vln]->chr) {
 		zputc(nbuf[vln]);
 	    } else
 		zputc(&zr_sp);  /* I don't think this should happen */
@@ -1954,11 +2010,11 @@ refreshline(int ln)
 	    if (!nl->chr) {
 		if (ccs == winw && hasam && char_ins > 0 && ins_last
 		    && vcs != winw) {
-		    nl--;           /* we can assume we can go back here */
+		    nl--;	   /* we can assume we can go back here */
 		    moveto(ln, winw - 1);
 		    zputc(nl);
 		    vcs++;
-		    return;         /* write last character in line */
+		    return;	 /* write last character in line */
 		}
 		if ((char_ins <= 0) || (ccs >= winw))    /* written everything */
 		    return;
@@ -2159,24 +2215,19 @@ moveto(int ln, int cl)
     const REFRESH_ELEMENT *rep;
 
     if (vcs == winw) {
-	if (rprompt_indent == 0 && tccan(TCLEFT)) {
-	  tc_leftcurs(1);
-	  vcs--;
+	vln++, vcs = 0;
+	if (!hasam) {
+	    zputc(&zr_cr);
+	    zputc(&zr_nl);
 	} else {
-	    vln++, vcs = 0;
-	    if (!hasam) {
-		zputc(&zr_cr);
-		zputc(&zr_nl);
-	    } else {
-		if ((vln < nlnct) && nbuf[vln] && nbuf[vln]->chr)
-		    rep = nbuf[vln];
-		else
-		    rep = &zr_sp;
-		zputc(rep);
-		zputc(&zr_cr);
-		if ((vln < olnct) && obuf[vln] && obuf[vln]->chr)
-		    *obuf[vln] = *rep;
-	    }
+	    if ((vln < nlnct) && nbuf[vln] && nbuf[vln]->chr)
+		rep = nbuf[vln];
+	    else
+		rep = &zr_sp;
+	    zputc(rep);
+	    zputc(&zr_cr);
+	    if ((vln < olnct) && obuf[vln] && obuf[vln]->chr)
+		*obuf[vln] = *rep;
 	}
     }
 
@@ -2212,7 +2263,7 @@ moveto(int ln, int cl)
     }
 
     if (cl != vcs)
-        singmoveto(cl);
+	singmoveto(cl);
 }
 
 /**/
@@ -2292,7 +2343,7 @@ tc_rightcurs(int ct)
 	    /* it is cheaper to send TCRIGHT than reprint the whole prompt */
 	    for (ct = lpromptw - i; ct--; )
 		tcout(TCRIGHT);
-        else {
+	else {
 	    if (i != 0)
 		zputc(&zr_cr);
 	    tc_upcurs(lprompth - 1);
@@ -2492,7 +2543,18 @@ singlerefresh(ZLE_STRING_T tmpline, int tmpll, int tmpcs)
 	    vsiz++;
 #endif
     }
+#ifdef __APPLE__
+    /*
+     * rdar://92128183 (zsh out-of-bounds crash at zle.so:  zrefresh)
+     *
+     * Since ZR_strlen() can be called on arbitrary slices of vbuf,
+     * make sure it's properly terminated.
+     */
+    vbuf = (REFRESH_STRING)zalloc((vsiz + 1) * sizeof(*vbuf));
+    vbuf[vsiz] = zr_zr;
+#else /* !__APPLE__ */
     vbuf = (REFRESH_STRING)zalloc(vsiz * sizeof(*vbuf));
+#endif /* __APPLE__ */
 
     if (tmpcs < 0) {
 #ifdef DEBUG
@@ -2646,6 +2708,21 @@ singlerefresh(ZLE_STRING_T tmpline, int tmpll, int tmpcs)
 	if ((winpos = nvcs - ((winw - hasam) / 2)) < 0)
 	    winpos = 0;
     }
+
+#ifdef __APPLE__
+    /*
+     * rdar://92128183 (zsh out-of-bounds crash at zle.so:  zrefresh)
+     *
+     * winpos is used directly as an index into vbuf, which is allocated above to
+     * be vsiz bytes long (including terminator).
+     * Clamp the value of winpos between (0, vsiz) to avoid a heap overflow.
+     */
+    if (winpos < 0)
+	winpos = 0;
+    if (winpos > vsiz)
+	winpos = vsiz;
+#endif /* __APPLE__ */
+
     if (winpos) {
 	vbuf[winpos].chr = ZWC('<');	/* line continues to the left */
 	vbuf[winpos].atr = 0;
@@ -2797,6 +2874,7 @@ zle_refresh_finish(void)
 
     if (region_highlights)
     {
+	free_region_highlights_memos();
 	zfree(region_highlights,
 	      sizeof(struct region_highlight) * n_region_highlights);
 	region_highlights = NULL;

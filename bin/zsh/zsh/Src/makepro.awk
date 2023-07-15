@@ -79,7 +79,7 @@ BEGIN {
 	    break
     }
     sub(/^ */, "", line)
-    match(line, /^((const|enum|mod_export|static|struct|union) +)*([_0-9A-Za-z]+ +|((char|double|float|int|long|short|unsigned|void) +)+)((const|static) +)*/)
+    match(line, /^((const|enum|mod_export|static|struct|union|volatile) +)*([_0-9A-Za-z]+ +|((char|double|float|int|long|short|unsigned|void) +)+)((const|static) +)*/)
     dtype = substr(line, 1, RLENGTH)
     sub(/ *$/, "", dtype)
     if(" " dtype " " ~ / static /)
@@ -121,7 +121,7 @@ BEGIN {
 		# initialiser.
 		dcltor = substr(line, 1, RLENGTH-1)
 		line = substr(line, RLENGTH+1)
-		sub(/\=.*$/, "", dcltor)
+		sub(/=.*$/, "", dcltor)
 		match(dcltor, /^([^_0-9A-Za-z]| const )*/)
 		dcltor = substr(dcltor, 1, RLENGTH) "@+" substr(dcltor, RLENGTH+1)
 		match(dcltor, /^.*@\+[_0-9A-Za-z]+/)
