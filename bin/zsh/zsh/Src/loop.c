@@ -43,7 +43,7 @@ mod_export int contflag;
 /* # of break levels */
  
 /**/
-mod_export int breaks;
+mod_export volatile int breaks;
 
 /**/
 int
@@ -425,7 +425,7 @@ execwhile(Estate state, UNUSED(int do_exec))
         breaks--;
 
         simple_pline = old_simple_pline;
-    } else
+    } else {
         for (;;) {
             state->pc = loop;
             noerrexit = NOERREXIT_EXIT | NOERREXIT_RETURN;
@@ -445,8 +445,11 @@ execwhile(Estate state, UNUSED(int do_exec))
 		    lastval = oldval;
                 break;
             }
-            if (retflag)
+            if (retflag) {
+		if (breaks)
+		    breaks--;
                 break;
+	    }
 
 	    /* In case the loop body is also a functional no-op,
 	     * make sure signal handlers recognize ^C as above. */
@@ -470,6 +473,7 @@ execwhile(Estate state, UNUSED(int do_exec))
             freeheap();
             oldval = lastval;
         }
+    }
     cmdpop();
     popheap();
     loops--;
@@ -493,13 +497,15 @@ execrepeat(Estate state, UNUSED(int do_exec))
 
     end = state->pc + WC_REPEAT_SKIP(code);
 
-    lastval = 0;
     tmp = ecgetstr(state, EC_DUPTOK, &htok);
-    if (htok)
+    if (htok) {
 	singsub(&tmp);
+	untokenize(tmp);
+    }
     count = mathevali(tmp);
     if (errflag)
 	return 1;
+    lastval = 0; /* used when the repeat count is zero */
     pushheap();
     cmdpush(CS_REPEAT);
     loops++;
@@ -566,7 +572,7 @@ execif(Estate state, int do_exec)
 
     if (run) {
 	/* we need to ignore lastval until we reach execcmd() */
-	if (olderrexit)
+	if (olderrexit || run == 2)
 	    noerrexit = olderrexit;
 	else if (lastval)
 	    noerrexit |= NOERREXIT_EXIT | NOERREXIT_RETURN | NOERREXIT_UNTIL_EXEC;
@@ -577,7 +583,7 @@ execif(Estate state, int do_exec)
 	cmdpop();
     } else {
 	noerrexit = olderrexit;
-	if (!retflag)
+	if (!retflag && !errflag)
 	    lastval = 0;
     }
     state->pc = end;
@@ -728,7 +734,7 @@ exectry(Estate state, int do_exec)
     Wordcode end, always;
     int endval;
     int save_retflag, save_breaks, save_contflag;
-    zlong save_try_errflag, save_try_tryflag, save_try_interrupt;
+    zlong save_try_errflag, save_try_interrupt;
 
     end = state->pc + WC_TRY_SKIP(state->pc[-1]);
     always = state->pc + 1 + WC_TRY_SKIP(*state->pc);
@@ -737,12 +743,9 @@ exectry(Estate state, int do_exec)
     cmdpush(CS_CURSH);
 
     /* The :try clause */
-    save_try_tryflag = try_tryflag;
-    try_tryflag = 1;
-
-    execlist(state, 1, do_exec);
-
-    try_tryflag = save_try_tryflag;
+    ++try_tryflag;
+    execlist(state, 1, 0);
+    --try_tryflag;
 
     /* Don't record errflag here, may be reset.  However, */
     /* endval should show failure when there is an error. */

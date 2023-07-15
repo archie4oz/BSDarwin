@@ -83,7 +83,7 @@ _moosic_add_cmds() {
     "noloop:turn loop mode off"
     "toggle-loop:toggle loop mode"
     "reconfigure:daemon reload configuration file"
-    "showconfig:show dameon filetype associations"
+    "showconfig:show daemon filetype associations"
     "start-server:starts new instance of daemon with given options"
     {quit,exit,die}":quit daemon"
     )
@@ -216,7 +216,7 @@ _moosic_cmd_version() {
 _moosic_song_files()
 {
     _arguments -A '-*' $main_opts $filelist_opts $auto_opts \
-               '*:song files:_files'
+               '*:song file:_files'
 }
 
 _moosic_cmd_append() {
@@ -282,7 +282,7 @@ _moosic_cmd_stagger-merge() {
 _moosic_cmd_interval-add() {
     _arguments -A '-*' $main_opts $filelist_opts \
                   '1:interval:' \
-                  '*:song files:_files'
+                  '*:song file:_files'
 }
 
 ### REMOVING COMMANDS

@@ -156,7 +156,7 @@ typedef union upat *Upat;
  *    P_BRANCH, but applies to the immediately preceding branch.  The code in
  *    the corresponding branch is followed by a P_EXCSYNC, which simply
  *    acts as a marker that a P_EXCLUDE comes next.  The P_EXCLUDE
- *    has a pointer to char embeded in it, which works
+ *    has a pointer to char embedded in it, which works
  *    like P_WBRANCH:  if we get to the P_EXCSYNC, and we already matched
  *    up to the same position, fail.  Thus we are forced to backtrack
  *    on closures in the P_BRANCH if the first attempt was excluded.
@@ -319,6 +319,14 @@ typedef wint_t patint_t;
  * need it we should use mbtowc() instead.
  */
 static mbstate_t shiftstate;
+
+/* See clear_mbstate() in params.c for the use of clear_shiftstate() */
+
+/**/
+mod_export void
+clear_shiftstate(void) {
+    memset(&shiftstate, 0, sizeof(shiftstate));
+}
 
 /*
  * Multibyte version: it's (almost) as easy to return the
@@ -502,14 +510,14 @@ patcompcharsset(void)
     }
 }
 
-/* Called before parsing a set of file matchs to initialize flags */
+/* Called before parsing a set of file matches to initialize flags */
 
 /**/
 void
 patcompstart(void)
 {
     patcompcharsset();
-    if (isset(CASEGLOB))
+    if (isset(CASEGLOB) || isset(CASEPATHS))
 	patglobflags = 0;
     else
 	patglobflags = GF_IGNCASE;
@@ -631,6 +639,13 @@ patcompile(char *exp, int inflags, char **endexp)
     p->size = patsize;
     p->patmlen = len;
     p->patnpar = patnpar-1;
+
+#ifndef __CYGWIN__  /* The filesystem itself is case-insensitive on Cygwin */
+    if ((patflags & PAT_FILE) && !isset(CASEGLOB) && !(patflags & PAT_PURES)) {
+	p->globflags |= GF_IGNCASE;
+	p->globend |= GF_IGNCASE;
+    }
+#endif
 
     if (!strp) {
 	pscan = (Upat)(patout + startoff);
@@ -1250,7 +1265,7 @@ patcomppiece(int *flagp, int paren)
     int hash, count;
     union upat up;
     char *nptr, *str0, *ptr, *patprev;
-    zrange_t from, to;
+    zrange_t from = 0, to;
     char *charstart;
 
     flags = 0;
@@ -1992,6 +2007,8 @@ charsub(char *x, char *y)
 
 	if (ret == MB_INVALID || ret == MB_INCOMPLETE) {
 	    /* Error.  Treat remainder as single characters */
+	    /* Reset the shift state for next time. */
+	    memset(&shiftstate, 0, sizeof(shiftstate));
 	    return res + (y - x);
 	}
 
@@ -2029,6 +2046,16 @@ int errsfound;				/* Total error count so far */
 
 /**/
 int forceerrs;				/* Forced maximum error count */
+
+/*
+ * exactpos is used to remember how far down an exact string we have
+ * matched, if we are doing approximation and can therefore redo from
+ * the same point; we never need to otherwise.
+ *
+ * exactend is a pointer to the end of the string, which isn't
+ * null-terminated.
+ */
+static char *exactpos, *exactend;
 
 /**/
 void
@@ -2072,7 +2099,7 @@ patmungestring(char **string, int *stringlen, int *unmetalenin)
 }
 
 /*
- * Allocate memeory for pattern match.  Note this is specific to use
+ * Allocate memory for pattern match.  Note this is specific to use
  * of pattern *and* trial string.
  *
  * Unmetafy a trial string for use in pattern matching, if needed.
@@ -2093,7 +2120,7 @@ patmungestring(char **string, int *stringlen, int *unmetalenin)
  * In patstralloc (supplied by caller, must last until last pattry is done)
  *  unmetalen is the unmetafied length of the string; it will be
  *    calculated if the input value is negative.
- *  unmetalenp is the umetafied length of a path segment preceeding
+ *  unmetalenp is the umetafied length of a path segment preceding
  *    the trial string needed for file mananagement; it is calculated as
  *    needed so does not need to be initialised.
  *  alloced is the memory allocated on the heap --- same as return value from
@@ -2227,7 +2254,7 @@ pattrylen(Patprog prog, char *string, int len, int unmetalen,
  * depends on both prog *and* the trial string).  This should only be
  * done if there is no path prefix (pathpos == 0) as otherwise the path
  * buffer and unmetafied string may not match.  To do this,
- * patallocstr() is callled (use force = 1 to ensure it is alway
+ * patallocstr() is called (use force = 1 to ensure it is always
  * unmetafied); paststralloc points to existing storage. Memory is
  * on the heap.
  *
@@ -2321,7 +2348,7 @@ pattryrefs(Patprog prog, char *string, int stringlen, int unmetalenin,
 	if (patstralloc->alloced)
 	{
 	    /*
-	     * Unmetafied; we need pattern sring that's also unmetafied.
+	     * Unmetafied; we need pattern string that's also unmetafied.
 	     * We'll cache it in the patstralloc structure.
 	     * Note it's on the heap.
 	     */
@@ -2379,7 +2406,7 @@ pattryrefs(Patprog prog, char *string, int stringlen, int unmetalenin,
 		/*
 		 * Remember the length in case used for ${..#..} etc.
 		 * In this case, we didn't unmetafy the pattern string
-		 * In the orignal structure, but it might be unmetafied
+		 * in the original structure, but it might be unmetafied
 		 * for use with an unmetafied test string.
 		 */
 		patinlen = pstrlen;
@@ -2463,6 +2490,8 @@ pattryrefs(Patprog prog, char *string, int stringlen, int unmetalenin,
 
 	patinput = patinstart;
 
+	exactpos = exactend = NULL;
+	/* The only external call to patmatch --- all others are recursive */
 	if (patmatch((Upat)progstr)) {
 	    /*
 	     * we were lazy and didn't save the globflags if an exclusion
@@ -2480,7 +2509,7 @@ pattryrefs(Patprog prog, char *string, int stringlen, int unmetalenin,
 	     * Optimization: if we didn't find any Meta characters
 	     * to begin with, we don't need to look for them now.
 	     *
-	     * For patstralloc pased in, we want the unmetafied length.
+	     * For patstralloc passed in, we want the unmetafied length.
 	     */
 	    if (patstralloc == &patstralloc_struct &&
 		patstralloc->unmetalen != origlen) {
@@ -2607,10 +2636,10 @@ pattryrefs(Patprog prog, char *string, int stringlen, int unmetalenin,
 }
 
 /*
- * Return length of previous succesful match.  This is
+ * Return length of previous successful match.  This is
  * in metafied bytes, i.e. includes a count of Meta characters,
  * unless the match was done on an unmetafied string using
- * a patstralloc stuct, in which case it, too is unmetafed.
+ * a patstralloc struct, in which case it too is unmetafied.
  * Unusual and futile attempt at modular encapsulation.
  */
 
@@ -2651,16 +2680,6 @@ patmatchlen(void)
  */
 #define CHARMATCH_EXPR(expr, chpa) \
 	(charmatch_cache = (expr), CHARMATCH(charmatch_cache, chpa))
-
-/*
- * exactpos is used to remember how far down an exact string we have
- * matched, if we are doing approximation and can therefore redo from
- * the same point; we never need to otherwise.
- *
- * exactend is a pointer to the end of the string, which isn't
- * null-terminated.
- */
-static char *exactpos, *exactend;
 
 /*
  * Main matching routine.

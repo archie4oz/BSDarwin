@@ -38,8 +38,6 @@ case $OSTYPE in
   ;;
   darwin*|freebsd*|dragonfly*)
     cmds+=( '(-n -i)-S[create an arp entry, replacing any existing entry]' )
-  ;|
-  darwin*|freebsd*)
     args+=( '(-s -Q -f)-i+[select an interface]:interface:_net_interfaces' )
   ;|
   darwin*)
@@ -63,7 +61,7 @@ case $OSTYPE in
   openbsd*)
     args+=(
       '(-a -d -W)-F[overwrite existing entries]'
-      '(-W)-V+[select the routing domain]:routing domain'
+      '(-W)-V+[select the routing domain]:routing domain:_routing_domains'
     )
     cmds+=(
       '(- 1)-W[send the wake on LAN frame]'

@@ -1,6 +1,6 @@
 #compdef find gfind
 
-local curcontext="$curcontext" state_descr variant default
+local curcontext="$curcontext" state_descr variant default ret=1
 local -a state line args alts disp smatch
 
 _pick_variant -r variant gnu=GNU $OSTYPE -version
@@ -89,7 +89,7 @@ case $variant in
       '-X[warn if filename contains characters special to xargs]'
       '-f[specify file hierarchy to traverse]:path:_directories'
       "-x[don't span filesystems]"
-      '*-flags:flags:_chflags'
+      '*-flags:flag:_chflags'
     )
   ;|
   freebsd*|dragonfly*) args+=( '*-sparse' ) ;|
@@ -98,7 +98,7 @@ case $variant in
     args+=(
       '(- *)-help' '(-)--help'
       '(- *)-version' '(-)--version'
-      '-D[print diagnostics]:debug option:(help tree search stat rates opt exec)'
+      '-D[print diagnostics]:debug option:(exec opt rates search stat time tree all help)'
       '-O+[enable query optimisation]:level:(1 2 3)'
       '*-daystart'
       '-regextype:regexp syntax:(help findutils-default awk egrep ed emacs gnu-awk grep posix-awk posix-basic posix-egrep posix-extended posix-minimal-basic sed)'
@@ -116,7 +116,7 @@ case $variant in
       '*-fprintf:output file:_files:output format'
       '*-printf:output format'
     )
-    [[ $OSTYPE = linux-gnu ]] && args+=( '*-context:SELinux context' )
+    [[ $OSTYPE = linux-gnu ]] && args+=( '*-context:SELinux context (glob pattern):_selinux_contexts' )
   ;;
 esac
 
@@ -147,7 +147,8 @@ _arguments -C $args \
   '*-user:user:_users' \
   '*-xdev' \
   '*-a' '*-o' \
-  '(-D -E -H -L -O -P -f -s -x --help --version)*:directory:_files -/'
+  '(-D -E -H -L -O -P -f -s -x --help --version)*:directory:_files -/' \
+&& ret=0
 
 if [[ $state = times ]]; then
   if ! compset -P '[+-]' || [[ -prefix '[0-9]' ]]; then
@@ -155,14 +156,16 @@ if [[ $state = times ]]; then
     if zstyle -t ":completion:${curcontext}:senses" verbose; then
       zstyle -s ":completion:${curcontext}:senses" list-separator sep || sep=--
       default=" [default exactly]"
-      disp=( "- $sep before" "+ $sep since" )
+      disp=( "+ $sep before (older files)" "- $sep since (newer files)" )
       smatch=( - + )
     else
       disp=( before exactly since )
-      smatch=( - '' + )
+      smatch=( + '' - )
     fi
     alts=( "senses:sense${default}:compadd -V times -S '' -d disp -a smatch" )
   fi
   alts+=( "times:${state_descr}:_dates -f d" )
-  _alternative $alts
+  _alternative $alts && ret=0
 fi
+
+return ret

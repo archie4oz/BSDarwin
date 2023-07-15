@@ -1,4 +1,5 @@
-fc [ -e ename ] [ -LI ] [ -m match ] [ old=new ... ] [ first [ last ] ]
+fc  [  -e ename ] [ -s ] [ -LI ] [ -m match ] [ old=new ... ] [ first [
+last ] ]
 fc -l [ -LI ] [ -nrdfEiD ] [ -t timefmt ] [ -m match ]
       [ old=new ... ] [ first [ last ] ]
 fc -p [ -a ] [ filename [ histsize [ savehistsize ] ] ]
@@ -18,33 +19,35 @@ fc -ARWI [ filename ]
        the  given  string.  All substitutions old=new, if any, are then
        performed on the text of the events.
 
-       In addition to the number range,
+       The range of events selected by numbers can be narrowed  further
+       by the following flags.
        -I     restricts to only internal events (not from $HISTFILE)
-       -L     restricts to only local events (not  from  other  shells,
+       -L     restricts  to  only  local events (not from other shells,
               see SHARE_HISTORY in zshoptions(1) -- note that $HISTFILE
               is considered local when read at startup)
-       -m     takes the first argument as a pattern (should be  quoted)
-              and  only  the  history  events matching this pattern are
-              considered
+       -m     takes  the  first  argument as a pattern (which should be
+              quoted) and only the history events matching this pattern
+              are considered
 
        If first is not specified, it will be set to -1 (the most recent
        event), or to -16 if the -l flag is given.  If last is not spec-
-       ified, it will be set to first, or to  -1  if  the  -l  flag  is
-       given.   However,  if the current event has added entries to the
+       ified,  it  will  be  set  to  first, or to -1 if the -l flag is
+       given.  However, if the current event has added entries  to  the
        history with `print -s' or `fc -R', then the default last for -l
        includes all new history entries since the current event began.
 
-       When  the  -l  flag is given, the resulting events are listed on
-       standard output.  Otherwise the editor program ename is  invoked
-       on  a  file  containing  these  history events.  If ename is not
-       given, the value of the parameter FCEDIT is used; if that is not
-       set  the  value  of the parameter EDITOR is used; if that is not
-       set a builtin default, usually `vi' is used.  If ename  is  `-',
-       no editor is invoked.  When editing is complete, the edited com-
-       mand is executed.
+       When the -l flag is given, the resulting events  are  listed  on
+       standard  output.   Otherwise the editor program specified by -e
+       ename is invoked on a file containing these history events.   If
+       -e  is  not given, the value of the parameter FCEDIT is used; if
+       that is not set the value of the parameter EDITOR  is  used;  if
+       that  is  not  set  a builtin default, usually `vi' is used.  If
+       ename is `-', no editor is invoked.  When editing  is  complete,
+       the edited command is executed.
 
-       The flag -r reverses the order of the events  and  the  flag  -n
-       suppresses event numbers when listing.
+       The flag `-s' is equivalent to `-e -'.  The flag -r reverses the
+       order of the events and the flag  -n  suppresses  event  numbers
+       when listing.
 
        Also when listing,
        -d     prints timestamps for each event

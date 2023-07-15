@@ -162,7 +162,7 @@ static int unary = 1;
 #define TOKCOUNT 53
 
 /*
- * Opeator recedences: in reverse order, i.e. lower number, high precedence.
+ * Operator precedences: in reverse order, i.e. lower number, high precedence.
  * These are the C precedences.
  *
  * 0   Non-operators: NUM (numeric constant), ID (identifier),
@@ -219,7 +219,7 @@ static int c_prec[TOKCOUNT] =
 };
 
 /*
- * Opeator recedences: in reverse order, i.e. lower number, high precedence.
+ * Operator precedences: in reverse order, i.e. lower number, high precedence.
  * These are the default zsh precedences.
  *
  * 0   Non-operators: NUM (numeric constant), ID (identifier),
@@ -831,6 +831,8 @@ zzlex(void)
 	case ' ': /* Fall through! */
 	case '\t':
 	case '\n':
+	case '"': /* POSIX says ignore these */
+	case Dnull:
 	    break;
 	default:
 	    if (idigit(*--ptr) || *ptr == '.')
@@ -838,13 +840,18 @@ zzlex(void)
 	    if (*ptr == '#') {
 		if (*++ptr == '\\' || *ptr == '#') {
 		    int v;
+		    char *optr = ptr;
 
 		    ptr++;
 		    if (!*ptr) {
 			zerr("bad math expression: character missing after ##");
 			return EOI;
 		    }
-		    ptr = getkeystring(ptr, NULL, GETKEYS_MATH, &v);
+		    if(!(ptr = getkeystring(ptr, NULL, GETKEYS_MATH, &v))) {
+			zerr("bad math expression: bad character after ##");
+			ptr = optr;
+			return EOI;
+		    }
 		    yyval.u.l = v;
 		    return NUM;
 		}
@@ -856,14 +863,18 @@ zzlex(void)
 
 		p = ptr;
 		ptr = ie;
-		if (ie - p == 3) {
-		    if (strncasecmp(p, "NaN", 3) == 0) {
+		if (ie - p == 3 && !EMULATION(EMULATE_SH)) {
+		    if ((p[0] == 'N' || p[0] == 'n') &&
+			(p[1] == 'A' || p[1] == 'a') &&
+			(p[2] == 'N' || p[2] == 'n')) {
 			yyval.type = MN_FLOAT;
 			yyval.u.d = 0.0;
 			yyval.u.d /= yyval.u.d;
 			return NUM;
 		    }
-		    else if (strncasecmp(p, "Inf", 3) == 0) {
+		    else if ((p[0] == 'I' || p[0] == 'i') &&
+			     (p[1] == 'N' || p[1] == 'n') &&
+			     (p[2] == 'F' || p[2] == 'f')) {
 			yyval.type = MN_FLOAT;
 			yyval.u.d = 0.0;
 			yyval.u.d = 1.0 / yyval.u.d;
@@ -1133,8 +1144,7 @@ notzero(mnumber a)
 
 /* macro to pop three values off the value stack */
 
-/**/
-void
+static void
 op(int what)
 {
     mnumber a, b, c, *spval;
@@ -1569,14 +1579,19 @@ mathparse(int pc)
 
     if (errflag)
 	return;
+    queue_signals();
     mtok = zzlex();
     /* Handle empty input */
-    if (pc == TOPPREC && mtok == EOI)
+    if (pc == TOPPREC && mtok == EOI) {
+	unqueue_signals();
 	return;
+    }
     checkunary(mtok, optr);
     while (prec[mtok] <= pc) {
-	if (errflag)
+	if (errflag) {
+	    unqueue_signals();
 	    return;
+	}
 	switch (mtok) {
 	case NUM:
 	    push(yyval, NULL, 0);
@@ -1595,6 +1610,7 @@ mathparse(int pc)
 	    if (mtok != M_OUTPAR) {
 		if (!errflag)
 		    zerr("bad math expression: ')' expected");
+		unqueue_signals();
 		return;
 	    }
 	    break;
@@ -1613,6 +1629,7 @@ mathparse(int pc)
 	    if (mtok != COLON) {
 		if (!errflag)
 		    zerr("bad math expression: ':' expected");
+		unqueue_signals();
 		return;
 	    }
 	    if (q)
@@ -1636,4 +1653,5 @@ mathparse(int pc)
 	mtok = zzlex();
 	checkunary(mtok, optr);
     }
+    unqueue_signals();
 }

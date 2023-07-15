@@ -33,6 +33,9 @@
 /* Flag for direction of sort: 1 forwards, -1 reverse */
 static int sortdir;
 
+/* Flag that sort ignores backslashes */
+static int sortnobslash;
+
 /* Flag that sort is numeric */
 static int sortnumeric;
 
@@ -113,16 +116,42 @@ eltpcmp(const void *a, const void *b)
 	bs += (laststarta - as);
 	as += (laststarta - as);
     }
+
+   if (sortnobslash) {
+	while (*as && *bs) {
+	    if (*as == '\\')
+		as++;
+	    if (*bs == '\\')
+		bs++;
+	    if (*as != *bs || !*as)
+		break;
+	    as++;
+	    bs++;
+	}
+    }
+
 #ifdef HAVE_STRCOLL
     cmp = strcoll(as, bs);
 #endif
+
     if (sortnumeric) {
+	int mul = 0;
 	for (; *as == *bs && *as; as++, bs++);
 #ifndef HAVE_STRCOLL
 	cmp = (int)STOUC(*as) - (int)STOUC(*bs);
 #endif
-	if (idigit(*as) || idigit(*bs)) {
+	if (sortnumeric < 0) {
+	    if (*as == '-' && idigit(as[1]) && idigit(*bs)) {
+		cmp = -1;
+		mul = 1;
+	    } else if (*bs == '-' && idigit(bs[1]) && idigit(*as)) {
+		cmp = 1;
+		mul = 1;
+	    }
+	}
+	if (!mul && (idigit(*as) || idigit(*bs))) {
 	    for (; as > ao && idigit(as[-1]); as--, bs--);
+	    mul = (sortnumeric < 0 && as > ao && as[-1] == '-') ? -1 : 1;
 	    if (idigit(*as) && idigit(*bs)) {
 		while (*as == '0')
 		    as++;
@@ -130,13 +159,13 @@ eltpcmp(const void *a, const void *b)
 		    bs++;
 		for (; idigit(*as) && *as == *bs; as++, bs++);
 		if (idigit(*as) || idigit(*bs)) {
-		    cmp = (int)STOUC(*as) - (int)STOUC(*bs);
+		    cmp = mul * ((int)STOUC(*as) - (int)STOUC(*bs));
 		    while (idigit(*as) && idigit(*bs))
 			as++, bs++;
 		    if (idigit(*as) && !idigit(*bs))
-			return sortdir;
+			return mul * sortdir;
 		    if (idigit(*bs) && !idigit(*as))
-			return -sortdir;
+			return -mul * sortdir;
 		}
 	    }
 	}
@@ -162,7 +191,10 @@ mod_export int
 zstrcmp(const char *as, const char *bs, int sortflags)
 {
     struct sortelt ae, be, *aeptr, *beptr;
-    int oldsortdir = sortdir, oldsortnumeric = sortnumeric, ret;
+    int oldsortdir = sortdir;
+    int oldsortnobslash = sortnobslash;
+    int oldsortnumeric = sortnumeric;
+    int ret;
 
     ae.cmp = as;
     be.cmp = bs;
@@ -173,11 +205,14 @@ zstrcmp(const char *as, const char *bs, int sortflags)
     beptr = &be;
 
     sortdir = 1;
-    sortnumeric = (sortflags & SORTIT_NUMERICALLY) ? 1 : 0;
+    sortnobslash = (sortflags & SORTIT_IGNORING_BACKSLASHES) ? 1 : 0;
+    sortnumeric = (sortflags & SORTIT_NUMERICALLY_SIGNED) ? -1 :
+	(sortflags & SORTIT_NUMERICALLY) ? 1 : 0;
 
     ret = eltpcmp(&aeptr, &beptr);
 
     /* Paranoia: I don't think we ever need to restore these. */
+    sortnobslash = oldsortnobslash;
     sortnumeric = oldsortnumeric;
     sortdir = oldsortdir;
 
@@ -227,7 +262,7 @@ strmetasort(char **array, int sortwhat, int *unmetalenp)
 	if (unmetalenp) {
 	    /*
 	     * Already unmetafied.  We just need to check for
-	     * embededded nulls.
+	     * embedded nulls.
 	     */
 	    int count = unmetalenp[arrptr-array];
 	    /* Remember this length for sorted array */
@@ -366,7 +401,8 @@ strmetasort(char **array, int sortwhat, int *unmetalenp)
     oldsortnumeric = sortnumeric;
 
     sortdir = (sortwhat & SORTIT_BACKWARDS) ? -1 : 1;
-    sortnumeric = (sortwhat & SORTIT_NUMERICALLY) ? 1 : 0;
+    sortnumeric = (sortwhat & SORTIT_NUMERICALLY_SIGNED) ? -1 :
+	(sortwhat & SORTIT_NUMERICALLY) ? 1 : 0;
 
     qsort(sortptrarr, nsort, sizeof(SortElt), eltpcmp);
 

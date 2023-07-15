@@ -73,7 +73,7 @@ _urpmi() {
 
   opts_net=(
     "($help --wget)--curl[use curl to retrieve distant files]"
-    "($help)--limit-rate[limit the download speed (b/s)]:download speed in b/s: "
+    "($help)--limit-rate[limit the download speed]:download speed (b/s)"
     "($help)--proxy:proxy host:_hosts"
     "($help)--proxy-user:proxy user:_users"
     "($help --curl)--wget[use wget to retrieve distant files]"
@@ -87,7 +87,7 @@ _urpmi() {
     "($help)--auto[automatically select a package in choices]"
     "($help)--force[force invocation even if some packages do not exist]"
     "($help)--parallel[distributed urpmi across machines of alias]:urpmi alias name:_urpmi_parallel_alias"
-    "($help)--root[use another root for rpm installation]:root diretory:_files -/"
+    "($help)--root[use another root for rpm installation]:root directory:_files -/"
     "($help)--test[test only, do not modify system]"
     "($help)-a[select all matches on command line]"
   )
@@ -131,7 +131,7 @@ _urpmi() {
 	"($help --no-probe --probe-hdlist)--probe-synthesis[try to find and use synthesis file]" \
 	"($help)--update[mark as update media]" \
 	"($help)--version[use specified distribution version]:Mandrake version: " \
-	"($help)--virtual[create virtual media wich are always up-to-date]" \
+	"($help)--virtual[create virtual media which are always up-to-date]" \
 	"($help)-c[clean headers cache directory]" \
 	"($help)-f[force generation of hdlist files]" \
 	"($help --distrib):name of media: " \
@@ -147,7 +147,7 @@ _urpmi() {
 	"($help : -)"{--help,-h}"[print usage information]" \
 	"($help :)-a[select all media]" \
 	"($help)-c[clean headers cache directory]" \
-	"($help)-y[fuzzy mathing on media names]" \
+	"($help)-y[fuzzy matching on media names]" \
 	"(-a)"{,\*}":media:_sequence _urpmi_media" \
        && ret=0
     ;;
@@ -176,7 +176,7 @@ _urpmi() {
 	"($help : -)"{--help,-h}"[print usage information]" \
 	"($help)--allow-force[allow asking user to install packages without dependencies checking and integrity]" \
 	"($help)--allow-nodeps[allow asking user to install packages without dependencies checking]" \
-	"($help)--auto-select[utomatically select packages to upgrade the system]" \
+	"($help)--auto-select[automatically select packages to upgrade the system]" \
 	"($help --env)--bug[output a bug report in given directory]:directory for bug report:_files -/" \
 	"($help -X)--best-output[automatically select text or X interface]" \
 	"($help --noclean)--clean[remove rpm from cache before anything else]" \
@@ -189,7 +189,7 @@ _urpmi() {
 	"($help)--more-choices[propose more choices than the default]" \
 	"($help --no-resume)--resume[resume transfer of partially-downloaded files]" \
 	"($help --resume)--no-resume[do not resume transfer of partially-downloaded files]" \
-	"($help)--root[use another root for rpm installation]:root diretory:_files -/" \
+	"($help)--root[use another root for rpm installation]:root directory:_files -/" \
 	"($help)--skip[packages which installation should be skipped]:packages: " \
 	"($help)--split-length[small transaction length]:transaction length: " \
 	"($help)--split-level[split in small transaction]:transaction size: " \
@@ -286,7 +286,7 @@ _urpmi() {
 	"($help --all --interactive  --name)--summary[print tag summary: summary]" \
 	"($help)--uniq[do not print identical lines]" \
 	"($help --all --interactive  --name)--url[print tag url: url]" \
-	"*:hdlist files:_files -g '*.cz(-.)'" \
+	"*:hdlist file:_files -g '*.cz(-.)'" \
       && ret=0
     ;;
   esac

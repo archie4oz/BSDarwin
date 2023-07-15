@@ -1212,7 +1212,7 @@ zccmd_input(const char *nam, char **args)
 		    addlinknode(margs, "CTRL");
 		if (mevent.bstate & BUTTON_ALT)
 		    addlinknode(margs, "ALT");
-		if (!setaparam(args[3], zlinklist2array(margs)))
+		if (!setaparam(args[3], zlinklist2array(margs, 1)))
 		    return 1;
 	    } else {
 #endif
@@ -1464,7 +1464,7 @@ zccmd_querychar(const char *nam, char **args)
     }
 
     /* Turn this into an array and store it. */
-    return !setaparam(args[1] ? args[1] : "reply", zlinklist2array(clist));
+    return !setaparam(args[1] ? args[1] : "reply", zlinklist2array(clist, 1));
 }
 
 
@@ -1519,7 +1519,7 @@ zccmd_resize(const char *nam, char **args)
             // is not available.
             return 0;
         } else {
-            // Without this call some window moves are innacurate. Tested on
+            // Without this call some window moves are inaccurate. Tested on
             // OS X ncurses 5.4, Homebrew ncursesw 6.0-2, Arch Linux ncursesw
             // 6.0, Ubuntu 14.04 ncurses 5.9, FreeBSD ncursesw.so.8
             //

@@ -91,7 +91,7 @@ keyvalpairelement(LinkList list, LinkNode node)
  * "flag"s contains PREFORK_* flags, defined in zsh.h.
  *
  * "ret_flags" is used to return PREFORK_* values from nested parameter
- * substitions.  It may be NULL in which case PREFORK_SUBEXP must not
+ * substitutions.  It may be NULL in which case PREFORK_SUBEXP must not
  * appear in flags; any return value from below will be discarded.
  */
 
@@ -765,7 +765,7 @@ filesubstr(char **namptr, int assign)
 		*namptr = dyncat(res, ptr2+1);
 		return 1;
 	    }
-	    if (isset(NOMATCH))
+	    if (isset(NOMATCH) && isset(EXECOPT))
 		zerr("no directory expansion: ~[%s]", tmp);
 	    return 0;
 	} else if (!inblank(str[1]) && isend(*ptr) &&
@@ -796,7 +796,7 @@ filesubstr(char **namptr, int assign)
 	    *namptr = dyncat(hom, ptr);
 	    return 1;
 	}
-    } else if (*str == Equals && isset(EQUALS) && str[1]) {   /* =foo */
+    } else if (*str == Equals && isset(EQUALS) && str[1] && str[1] != Inpar) {   /* =foo */
 	char *expn = equalsubstr(str+1, assign, isset(NOMATCH));
 	if (expn) {
 	    *namptr = expn;
@@ -1548,7 +1548,7 @@ untok_and_escape(char *s, int escapes, int tok_arg)
 /*
  * See if an argument str looks like a subscript or length following
  * a colon and parse it.  It must be followed by a ':' or nothing.
- * If this succeeds, expand and return the evaulated expression if
+ * If this succeeds, expand and return the evaluated expression if
  * found, else return NULL.
  *
  * We assume this is what is meant if the first character is not
@@ -1565,6 +1565,11 @@ check_colon_subscript(char *str, char **endp)
     if (!*str || ialpha(*str) || *str == '&')
 	return NULL;
 
+    if (*str == ':') {
+	*endp = str;
+	return dupstring("0");
+    }
+
     *endp = parse_subscript(str, 0, ':');
     if (!*endp) {
 	/* No trailing colon? */
@@ -1575,8 +1580,10 @@ check_colon_subscript(char *str, char **endp)
     sav = **endp;
     **endp = '\0';
     str = dupstring(str);
-    if (parsestr(&str))
+    if (parsestr(&str)) {
+	**endp = sav;
 	return NULL;
+    }
     singsub(&str);
     remnulargs(str);
     untokenize(str);
@@ -1682,7 +1689,7 @@ paramsubst(LinkList l, LinkNode n, char **str, int qt, int pf_flags,
      */
     int wantt = 0;
     /*
-     * Indicates spliting a string into an array.  There aren't
+     * Indicates splitting a string into an array.  There aren't
      * actually that many special cases for this --- which may
      * be why it doesn't work properly; we split in some cases
      * where we shouldn't, in particular on the multsubs for
@@ -1701,7 +1708,7 @@ paramsubst(LinkList l, LinkNode n, char **str, int qt, int pf_flags,
     /*
      * This expressive name refers to the set of flags which
      * is applied to matching for #, %, / and their doubled variants:
-     * (M), (R), (B), (E), (N), (S).
+     * (M), (R), (B), (E), (N), (S), (*).
      */
     int flags = 0;
     /* Value from (I) flag, used for ditto. */
@@ -1732,7 +1739,7 @@ paramsubst(LinkList l, LinkNode n, char **str, int qt, int pf_flags,
     int mods = 0;
     /*
      * The (z) flag, nothing to do with SH_WORD_SPLIT which is tied
-     * spbreak, see above; fairly straighforward in use but c.f.
+     * spbreak, see above; fairly straightforward in use but cf.
      * the comment for mods.
      *
      * This gets set to one of the LEXFLAGS_* values.
@@ -1847,6 +1854,12 @@ paramsubst(LinkList l, LinkNode n, char **str, int qt, int pf_flags,
      * nested (P) flags.
      */
     int fetch_needed;
+    /*
+     * If an array parameter is quoted but has :offset:length (as in
+     * "${array:off:len}"), we apply :off:len as array index before
+     * joining the array into a string (for compatibility with ksh/bash).
+     */
+    int quoted_array_with_offset = 0;
 
     *s++ = '\0';
     /*
@@ -1923,6 +1936,10 @@ paramsubst(LinkList l, LinkNode n, char **str, int qt, int pf_flags,
 		case '@':
 		    nojoin = 2;	/* nojoin = 2 means force */
 		    break;
+		case '*':
+		case Star:
+		    flags |= SUB_EGLOB;
+		    break;
 		case 'M':
 		    flags |= SUB_MATCH;
 		    break;
@@ -1971,6 +1988,10 @@ paramsubst(LinkList l, LinkNode n, char **str, int qt, int pf_flags,
 		    break;
 		case 'n':
 		    sortit |= SORTIT_NUMERICALLY;
+		    break;
+		case '-':
+		case Dash:
+		    sortit |= SORTIT_NUMERICALLY_SIGNED;
 		    break;
 		case 'a':
 		    sortit |= SORTIT_SOMEHOW;
@@ -2244,9 +2265,31 @@ paramsubst(LinkList l, LinkNode n, char **str, int qt, int pf_flags,
 		    break;
 
 		default:
-		  flagerr:
-		    zerr("error in flags");
-		    return NULL;
+		flagerr:
+		    {
+			/* 
+			 * We're trying to output the string that failed to
+			 * parse and the offset of the parse error within that.
+			 *
+			 * The string is *str.  It hasn't been changed since
+			 * entry to this function, I think, except that the
+			 * first non-variable-declaration line in this function
+			 * (currently the 238th line in this function)
+			 * writes a NUL to the first place in *str, so we'll
+			 * compensate by outputting the dollar sign manually.
+			 */
+			char *str_copy_for_output = dupstring(*str + 1);
+
+			/* 
+			 * Convert to a 1-based offset, because the shell
+			 * language is 1-based by default.
+			 */
+			zlong offset = s - *str + 1;
+
+			untokenize(str_copy_for_output);
+			zerr("error in flags near position %z in '$%s'", offset, str_copy_for_output);
+			return NULL;
+		    }
 		}
 	    }
 	    s++;
@@ -2526,7 +2569,8 @@ paramsubst(LinkList l, LinkNode n, char **str, int qt, int pf_flags,
 	     * Handle the (t) flag: value now becomes the type
 	     * information for the parameter.
 	     */
-	    if (v && v->pm && !(v->pm->node.flags & PM_UNSET)) {
+	    if (v && v->pm && ((v->pm->node.flags & PM_DECLARED) ||
+			       !(v->pm->node.flags & PM_UNSET))) {
 		int f = v->pm->node.flags;
 
 		switch (PM_TYPE(f)) {
@@ -2725,7 +2769,7 @@ paramsubst(LinkList l, LinkNode n, char **str, int qt, int pf_flags,
      * substitution is in quotes) always good enough?  Potentially
      * we may be OK by now --- all potential `@'s and subexpressions
      * have been handled, including any [@] index which comes up
-     * by virture of v->isarr being set to SCANPM_ISVAR_AT which
+     * by virtue of v->isarr being set to SCANPM_ISVAR_AT which
      * is now in isarr.
      *
      * However, if we are replacing multsub() with something that
@@ -2781,7 +2825,6 @@ paramsubst(LinkList l, LinkNode n, char **str, int qt, int pf_flags,
 	}
 
 	if (bct) {
-	noclosebrace:
 	    zerr("closing brace expected");
 	    return NULL;
 	}
@@ -2800,7 +2843,7 @@ paramsubst(LinkList l, LinkNode n, char **str, int qt, int pf_flags,
 		    c == '#' || c == Pound ||
 		    c == '?' || c == Quest ||
 		    c == '/')) {
-
+	int eglob = isset(EXTENDEDGLOB);
 	/*
 	 * Default index is 1 if no (I) or (I) gave zero.   But
 	 * why don't we set the default explicitly at the start
@@ -2822,9 +2865,10 @@ paramsubst(LinkList l, LinkNode n, char **str, int qt, int pf_flags,
 	    char *ptr;
 	    /*
 	     * previous flags are irrelevant, except for (S) which
-	     * indicates shortest substring; else look for longest.
+	     * indicates shortest substring; else look for longest,
+	     * and (*) which temporarily enables extended globbing.
 	     */
-	    flags = (flags & SUB_SUBSTR) ? 0 : SUB_LONG;
+	    flags = ((flags & SUB_SUBSTR) ? 0 : SUB_LONG)|(flags & SUB_EGLOB);
 	    if ((c = *s) == '/') {
 		/* doubled, so replace all occurrences */
 		flags |= SUB_GLOBAL;
@@ -2937,9 +2981,12 @@ paramsubst(LinkList l, LinkNode n, char **str, int qt, int pf_flags,
 	    }
 	    break;
 	case ':':
-	    /* this must be `::=', unconditional assignment */
-	    if (*s != '=' && *s != Equals)
-		goto noclosebrace;
+	    /* this could be either `::=', unconditional assignment
+	     * or a ${name:offset:length} with an empty offset */
+	    if (*s != '=' && *s != Equals) {
+		s -= 1;
+		goto colonsubscript;
+	    }
 	    vunset = 1;
 	    s++;
 	    /* Fall through */
@@ -3044,7 +3091,7 @@ paramsubst(LinkList l, LinkNode n, char **str, int qt, int pf_flags,
                              * shouldn't be any if not interactive.
                              */
                             stopmsg = 1;
-                            zexit(1, 0);
+                            zexit(1, ZEXIT_NORMAL);
                         } else
                             _exit(1);
                     }
@@ -3110,7 +3157,7 @@ paramsubst(LinkList l, LinkNode n, char **str, int qt, int pf_flags,
 
 	    /*
 	     * Either loop over an array doing replacements or
-	     * do the replacment on a string.
+	     * do the replacement on a string.
 	     *
 	     * We need an untokenized value for matching.
 	     */
@@ -3123,7 +3170,10 @@ paramsubst(LinkList l, LinkNode n, char **str, int qt, int pf_flags,
 		for (ap = aval; *ap; ap++) {
 		    untokenize(*ap);
 		}
+		if (flags & SUB_EGLOB)
+		    opts[EXTENDEDGLOB] = 1;
 		getmatcharr(&aval, s, flags, flnum, replstr);
+		opts[EXTENDEDGLOB] = eglob;
 	    } else {
 		if (vunset) {
 		    if (vunset > 0 && unset(UNSET)) {
@@ -3138,7 +3188,10 @@ paramsubst(LinkList l, LinkNode n, char **str, int qt, int pf_flags,
 		    copied = 1;
 		    untokenize(val);
 		}
+		if (flags & SUB_EGLOB)
+		    opts[EXTENDEDGLOB] = 1;
 		getmatch(&val, s, flags, flnum, replstr);
+		opts[EXTENDEDGLOB] = eglob;
 	    }
 	    break;
 	}
@@ -3282,6 +3335,7 @@ paramsubst(LinkList l, LinkNode n, char **str, int qt, int pf_flags,
 	 * if there isn't a trailing modifier?  Why don't we do this
 	 * e.g. when we handle the ${(t)...} flag?
 	 */
+colonsubscript:
 	if (chkset) {
 	    val = dupstring(vunset ? "0" : "1");
 	    isarr = 0;
@@ -3314,20 +3368,31 @@ paramsubst(LinkList l, LinkNode n, char **str, int qt, int pf_flags,
 		    return NULL;
 		}
 		if (*check_offset2) {
+		    char *nextp;
 		    check_offset = check_colon_subscript(check_offset2 + 1,
-							 &check_offset2);
-		    if (*check_offset2 && *check_offset2 != ':') {
-			zerr("invalid length: %s", check_offset);
-			return NULL;
-		    }
+							 &nextp);
 		    if (check_offset) {
+			check_offset2 = nextp;
+			if (*check_offset2 && *check_offset2 != ':') {
+			    zerr("invalid length: %s", check_offset);
+			    return NULL;
+			}
 			length = mathevali(check_offset);
 			length_set = 1;
 			if (errflag)
 			    return NULL;
 		    }
 		}
-		if (isarr) {
+		/*
+		 * We've got :OFFSET (and :LENGTH).
+		 * If aval is non-NULL but isarr is 0, PARAM is (probably)
+		 * an array but quoted like "${PARAM:OFFSET}". We apply
+		 * :OFFSET as array index (as if it is not quoted). We will
+		 * join them later (search for quoted_array_with_offset).
+		 */
+		if (aval && !isarr)
+		    quoted_array_with_offset = 1;
+		if (isarr || quoted_array_with_offset) {
 		    int alen, count;
 		    char **srcptr, **dstptr, **newarr;
 
@@ -3438,7 +3503,7 @@ paramsubst(LinkList l, LinkNode n, char **str, int qt, int pf_flags,
 	    s--;
 	    if (unset(KSHARRAYS) || inbrace) {
 		if (!isarr)
-		    modify(&val, &s);
+		    modify(&val, &s, inbrace);
 		else {
 		    char *ss;
 		    char **ap = aval;
@@ -3447,12 +3512,12 @@ paramsubst(LinkList l, LinkNode n, char **str, int qt, int pf_flags,
 
 		    while ((*pp = *ap++)) {
 			ss = s;
-			modify(pp++, &ss);
+			modify(pp++, &ss, inbrace);
 		    }
 		    if (pp == aval) {
 			char *t = "";
 			ss = s;
-			modify(&t, &ss);
+			modify(&t, &ss, inbrace);
 		    }
 		    s = ss;
 		}
@@ -3572,9 +3637,9 @@ paramsubst(LinkList l, LinkNode n, char **str, int qt, int pf_flags,
      * exception is that ${name:-word} and ${name:+word} will have already
      * done any requested splitting of the word value with quoting preserved.
      */
-    if (ssub || spbreak || spsep || sep) {
+    if (ssub || spbreak || spsep || sep || quoted_array_with_offset) {
 	int force_split = !ssub && (spbreak || spsep);
-	if (isarr) {
+	if (isarr || quoted_array_with_offset) {
 	    /* sep non-null here means F or j flag, force join */
 	    if (nojoin == 0 || sep) {
 		val = sepjoin(aval, sep, 1);
@@ -4182,6 +4247,12 @@ arithsubst(char *a, char **bptr, char *rest)
  * PTR is an in/out parameter.  On entry it contains the string of colon
  * modifiers.  On return it points past the last recognised modifier.
  *
+ * INBRACE is non-zero if we are in some form of a bracketed or
+ * parenthesised expression; it is zero for modifiers ocurring
+ * in an an unbracketed variable substitution.  This means that
+ * $foo:t222 is treated ias ${foo:t}222 rather than ${foo:t222}
+ * for backward compatibility.
+ *
  * Example:
  *     ENTRY:   *str is "."   *ptr is ":AN"
  *     RETURN:  *str is "/home/foobar" (equal to $PWD)   *ptr points to the "N"
@@ -4189,7 +4260,7 @@ arithsubst(char *a, char **bptr, char *rest)
 
 /**/
 void
-modify(char **str, char **ptr)
+modify(char **str, char **ptr, int inbrace)
 {
     char *ptr1, *ptr2, *ptr3, *lptr, c, *test, *sep, *t, *tt, tc, *e;
     char *copy, *all, *tmp, sav, sav1, *ptr1end;
@@ -4202,6 +4273,8 @@ modify(char **str, char **ptr)
 	*str = dupstring(*str);
 
     while (**ptr == ':') {
+	int count = 0;
+
 	lptr = *ptr;
 	(*ptr)++;
 	wall = gbal = 0;
@@ -4214,16 +4287,25 @@ modify(char **str, char **ptr)
             case 'a':
             case 'A':
 	    case 'c':
-	    case 'h':
 	    case 'r':
 	    case 'e':
-	    case 't':
 	    case 'l':
 	    case 'u':
 	    case 'q':
 	    case 'Q':
 	    case 'P':
 		c = **ptr;
+		break;
+
+	    case 'h':
+	    case 't':
+		c = **ptr;
+		if (inbrace && idigit((*ptr)[1])) {
+		    do {
+			count = 10 * count + ((*ptr)[1] - '0');
+			++(*ptr);
+		    } while (idigit((*ptr)[1]));
+		}
 		break;
 
 	    case 's':
@@ -4382,7 +4464,7 @@ modify(char **str, char **ptr)
 			chabspath(&copy);
 			break;
 		    case 'A':
-			chrealpath(&copy);
+			chrealpath(&copy, 'A', 1);
 			break;
 		    case 'c':
 		    {
@@ -4392,7 +4474,7 @@ modify(char **str, char **ptr)
 			break;
 		    }
 		    case 'h':
-			remtpath(&copy);
+			remtpath(&copy, count);
 			break;
 		    case 'r':
 			remtext(&copy);
@@ -4401,7 +4483,7 @@ modify(char **str, char **ptr)
 			rembutext(&copy);
 			break;
 		    case 't':
-			remlpaths(&copy);
+			remlpaths(&copy, count);
 			break;
 		    case 'l':
 			copy = casemodify(tt, CASMOD_LOWER);
@@ -4468,7 +4550,7 @@ modify(char **str, char **ptr)
 		    chabspath(str);
 		    break;
 		case 'A':
-		    chrealpath(str);
+		    chrealpath(str, 'A', 1);
 		    break;
 		case 'c':
 		{
@@ -4478,7 +4560,7 @@ modify(char **str, char **ptr)
 		    break;
 		}
 		case 'h':
-		    remtpath(str);
+		    remtpath(str, count);
 		    break;
 		case 'r':
 		    remtext(str);
@@ -4487,7 +4569,7 @@ modify(char **str, char **ptr)
 		    rembutext(str);
 		    break;
 		case 't':
-		    remlpaths(str);
+		    remlpaths(str, count);
 		    break;
 		case 'l':
 		    *str = casemodify(*str, CASMOD_LOWER);

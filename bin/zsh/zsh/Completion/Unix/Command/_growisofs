@@ -208,7 +208,7 @@ else
     '-G[specify path and file-name of a generic boot-image]:boot image:_files' \
     '-hard-disk-boot[specify that the el torito boot-image  is a hard-disk image]' \
     '-no-emul-boot[specify that the el torito boot-image is a "no emulation" image]' \
-    '-no-boot[specify that the el torito CD should be markes an non-bootable]' \
+    '-no-boot[specify that the el torito CD should be marked non-bootable]' \
     '-boot-load-seg[specify the load-segment address of the boot-image for a "no emulation" image]:segment address' \
     '-boot-lead-size[specify the number of 512-byte sectors to load in "no emulation" mode]:load sectors' \
     '-boot-info-table[specify that a 56-byte table of CD-ROM-layout information should be written]' \
@@ -270,7 +270,7 @@ else
     '-sort[sort files on the image based on weights defined in the given file]:sort-weighting file:_files' \
     '-sparc-label[set the sun disk-label-name used for the -sparc-boot option]:label' \
     '-split-output[split the output image into several files ~1GiB in size]' \
-    '-stream-media-size[enable streaming operation and set media size to given number of sectors]:media size in sectors' \
+    '-stream-media-size[enable streaming operation and set media size to given number of sectors]:media size (sectors)' \
     '-stream-file-name[reserved for future use]:name' \
     '-sunx86-boot[specify a comma-separated list of file-system images needed to make a bootable Solaris-x86-CD]:list' \
     '-sunx86-label[specify the SVr4 disk-label-name for the SVr4 disk-label created with the -sunx86-boot option]:label' \
