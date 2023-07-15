@@ -56,7 +56,11 @@
 #ifndef _CRYPTO_MD5_H_
 #define _CRYPTO_MD5_H_
 
+#if KERNEL
 #include <sys/types.h>
+#else /* !KERNEL */
+#include <machine/types.h>
+#endif /* KERNEL */
 #include <sys/cdefs.h>
 
 __BEGIN_DECLS

@@ -23,8 +23,7 @@ OS_PUBLIC_HEADERS_FOLDER_PATH = $(SDK_INSTALL_HEADERS_ROOT)/usr/include/os
 EXECUTABLE_PREFIX = libsystem_
 PRODUCT_NAME = kernel
 ALWAYS_SEARCH_USER_PATHS = NO
-ORDER_FILE[sdk=iphoneos*] = $(SDKROOT)/$(APPLE_INTERNAL_DIR)/OrderFiles/libsystem_kernel.order
-OTHER_CFLAGS = -fdollars-in-identifiers -no-cpp-precomp -fno-common -fno-stack-protector -fno-stack-check -momit-leaf-frame-pointer -DLIBSYSCALL_INTERFACE -D__DARWIN_VERS_1050=1 -DNO_SYSCALL_LEGACY
+OTHER_CFLAGS = -fdollars-in-identifiers -no-cpp-precomp -fno-common -fno-stack-protector -fno-stack-check -fno-builtin-calloc -momit-leaf-frame-pointer -DLIBSYSCALL_INTERFACE -D__DARWIN_VERS_1050=1 -DNO_SYSCALL_LEGACY
 OTHER_CFLAGS[sdk=macosx*][arch=i386] = $(inherited) -UNO_SYSCALL_LEGACY -DSYSCALL_PRE1050
 OTHER_CFLAGS[sdk=macosx*][arch=x86_64*] = $(inherited) -DSYSCALL_PRE1050
 GCC_PREPROCESSOR_DEFINITIONS = CF_OPEN_SOURCE CF_EXCLUDE_CSTD_HEADERS DEBUG _FORTIFY_SOURCE=0
@@ -33,9 +32,9 @@ HEADER_SEARCH_PATHS = $(PROJECT_DIR)/mach $(PROJECT_DIR)/os $(PROJECT_DIR)/wrapp
 SYSTEM_HEADER_SEARCH_PATHS = $(SDKROOT)/$(SDK_INSTALL_HEADERS_ROOT)/System/Library/Frameworks/System.framework/PrivateHeaders $(SDKROOT)/$(SDK_INSTALL_HEADERS_ROOT)/usr/local/include $(SDKROOT)/$(SDK_INSTALL_HEADERS_ROOT)/usr/include
 SYSTEM_FRAMEWORK_SEARCH_PATHS = $(SDKROOT)/$(SDK_INSTALL_HEADERS_ROOT)/System/Library/Frameworks
 
-OTHER_MIGFLAGS = -novouchers -I$(SDKROOT)/$(SDK_INSTALL_HEADERS_ROOT)/System/Library/Frameworks/System.framework/PrivateHeaders -I$(SDKROOT)/$(SDK_INSTALL_HEADERS_ROOT)/usr/local/include -I$(SDKROOT)/$(SDK_INSTALL_HEADERS_ROOT)/usr/include
+OTHER_MIGFLAGS = -novouchers -I$(SDKROOT)/$(SDK_INSTALL_HEADERS_ROOT)/System/Library/Frameworks/System.framework/PrivateHeaders -I$(SDKROOT)/$(SDK_INSTALL_HEADERS_ROOT)/usr/local/include -I$(SDKROOT)/$(SDK_INSTALL_HEADERS_ROOT)/usr/include -DKOBJECT_SERVER
 
-WARNING_CFLAGS = -Wmost
+WARNING_CFLAGS = -Wmost -Wformat=2
 GCC_TREAT_WARNINGS_AS_ERRORS = YES
 GCC_WARN_ABOUT_MISSING_NEWLINE = YES
 GCC_NO_COMMON_BLOCKS = YES
@@ -62,12 +61,7 @@ CLANG_WARN_SUSPICIOUS_MOVE = YES
 
 CODE_SIGN_IDENTITY = -
 DYLIB_CURRENT_VERSION = $(RC_ProjectSourceVersion)
-DYLIB_LDFLAGS = -umbrella System -all_load
-DYLIB_LDFLAGS[sdk=iphoneos*] = $(inherited) -Wl,-sectalign,__DATA,__data,1000
-DYLIB_LDFLAGS[sdk=watchos*] = $(inherited) -Wl,-sectalign,__DATA,__data,1000
-DYLIB_LDFLAGS[sdk=tvos*] = $(inherited) -Wl,-sectalign,__DATA,__data,1000
-DYLIB_LDFLAGS[sdk=appletvos*] = $(inherited) -Wl,-sectalign,__DATA,__data,1000
-DYLIB_LDFLAGS[sdk=bridgeos*] = $(inherited) -Wl,-sectalign,__DATA,__data,1000
+DYLIB_LDFLAGS = -umbrella System -all_load $(BUILT_PRODUCTS_DIR)/$(EXECUTABLE_PREFIX)$(PRODUCT_NAME).a
 OTHER_LDFLAGS = $(SIMULATOR_LDFLAGS)
 SIMULATOR_LDFLAGS =
 SIMULATOR_LDFLAGS[sdk=macosx*] = -Wl,-simulator_support
@@ -75,5 +69,7 @@ INSTALLHDRS_SCRIPT_PHASE = YES
 INSTALLHDRS_COPY_PHASE = YES
 USE_HEADERMAP = NO
 LINK_WITH_STANDARD_LIBRARIES = NO
+LLVM_LTO = YES
+LLVM_LTO[arch=armv7*] = NO
 ALWAYS_SEARCH_USER_PATHS = YES
 IS_ZIPPERED = YES

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2017 Apple Inc. All rights reserved.
+ * Copyright (c) 2012-2020 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -48,6 +48,7 @@
 #include <netinet/tcp_seq.h>
 #include <netinet/tcp_var.h>
 #include <netinet/tcp_timer.h>
+#include <netinet/mptcp.h>
 #include <netinet/mptcp_var.h>
 #include <netinet/mptcp_timer.h>
 
@@ -99,15 +100,13 @@ struct pr_usrreqs mptcp_usrreqs = {
 };
 
 
-#if (DEVELOPMENT || DEBUG)
-static int mptcp_disable_entitlements = 0;
-SYSCTL_INT(_net_inet_mptcp, OID_AUTO, disable_entitlements, CTLFLAG_RW | CTLFLAG_LOCKED,
-    &mptcp_disable_entitlements, 0, "Disable Multipath TCP Entitlement Checking");
-#endif
-
 int mptcp_developer_mode = 0;
 SYSCTL_INT(_net_inet_mptcp, OID_AUTO, allow_aggregate, CTLFLAG_RW | CTLFLAG_LOCKED,
     &mptcp_developer_mode, 0, "Allow the Multipath aggregation mode");
+
+int mptcp_no_first_party = 0;
+SYSCTL_INT(_net_inet_mptcp, OID_AUTO, no_first_party, CTLFLAG_RW | CTLFLAG_LOCKED,
+    &mptcp_no_first_party, 0, "Do not do first-party app exemptions");
 
 static unsigned long mptcp_expected_progress_headstart = 5000;
 SYSCTL_ULONG(_net_inet_mptcp, OID_AUTO, expected_progress_headstart, CTLFLAG_RW | CTLFLAG_LOCKED,
@@ -126,16 +125,12 @@ mptcp_usr_attach(struct socket *mp_so, int proto, struct proc *p)
 	VERIFY(mpsotomppcb(mp_so) == NULL);
 
 	error = mptcp_attach(mp_so, p);
-	if (error != 0) {
+	if (error) {
 		goto out;
 	}
-	/*
-	 * XXX: adi@apple.com
-	 *
-	 * Might want to use a different SO_LINGER timeout than TCP's?
-	 */
+
 	if ((mp_so->so_options & SO_LINGER) && mp_so->so_linger == 0) {
-		mp_so->so_linger = TCP_LINGERTIME * hz;
+		mp_so->so_linger = (short)(TCP_LINGERTIME * hz);
 	}
 out:
 	return error;
@@ -226,6 +221,10 @@ mptcp_entitlement_check(struct socket *mp_so, uint8_t svctype)
 {
 	struct mptses *mpte = mpsotompte(mp_so);
 
+	if (mptcp_no_first_party) {
+		return 0;
+	}
+
 	/* First, check for mptcp_extended without delegation */
 	if (soopt_cred_check(mp_so, PRIV_NET_RESTRICTED_MULTIPATH_EXTENDED, TRUE, FALSE) == 0) {
 		/*
@@ -247,36 +246,17 @@ mptcp_entitlement_check(struct socket *mp_so, uint8_t svctype)
 		return 0;
 	}
 
-	/* Now, take a look at exceptions configured through sysctl */
-#if (DEVELOPMENT || DEBUG)
-	if (mptcp_disable_entitlements) {
-		return 0;
-	}
-#endif
-
 	if (svctype == MPTCP_SVCTYPE_AGGREGATE) {
 		if (mptcp_developer_mode) {
 			return 0;
 		}
 
-		goto deny;
+		os_log_error(mptcp_log_handle, "%s - %lx: MPTCP prohibited on svc %u\n",
+		    __func__, (unsigned long)VM_KERNEL_ADDRPERM(mpte), mpte->mpte_svctype);
+		return -1;
 	}
 
-	/* Second, check for regular users that are within the data-limits */
-	if (soopt_cred_check(mp_so, PRIV_NET_PRIVILEGED_MULTIPATH, TRUE, FALSE) == 0) {
-		return 0;
-	}
-
-	if (mp_so->so_flags & SOF_DELEGATED &&
-	    soopt_cred_check(mp_so, PRIV_NET_PRIVILEGED_MULTIPATH, TRUE, TRUE) == 0) {
-		return 0;
-	}
-
-deny:
-	os_log_error(mptcp_log_handle, "%s - %lx: MPTCP prohibited on svc %u\n",
-	    __func__, (unsigned long)VM_KERNEL_ADDRPERM(mpte), svctype);
-
-	return -1;
+	return 0;
 }
 
 /*
@@ -364,6 +344,12 @@ mptcp_usr_connectx(struct socket *mp_so, struct sockaddr *src,
 
 	if ((mp_so->so_state & (SS_ISCONNECTED | SS_ISCONNECTING)) == 0) {
 		memcpy(&mpte->mpte_u_dst, dst, dst->sa_len);
+
+		if (dst->sa_family == AF_INET) {
+			memcpy(&mpte->mpte_sub_dst_v4, dst, dst->sa_len);
+		} else {
+			memcpy(&mpte->mpte_sub_dst_v6, dst, dst->sa_len);
+		}
 	}
 
 	if (src) {
@@ -482,11 +468,11 @@ mptcp_getconninfo(struct mptses *mpte, sae_connid_t *cid, uint32_t *flags,
 	*aux_type = 0;
 	*ifindex = 0;
 	*soerror = 0;
+	struct mptcb *mp_tp = mpte->mpte_mptcb;
 
 	/* MPTCP-level global stats */
 	if (*cid == SAE_CONNID_ALL) {
 		struct socket *mp_so = mptetoso(mpte);
-		struct mptcb *mp_tp = mpte->mpte_mptcb;
 		struct conninfo_multipathtcp mptcp_ci;
 		int error = 0;
 
@@ -511,6 +497,9 @@ mptcp_getconninfo(struct mptses *mpte, sae_connid_t *cid, uint32_t *flags,
 		}
 		if (mp_tp->mpt_flags & MPTCPF_FALLBACK_TO_TCP) {
 			*flags |= CIF_MP_DEGRADED;
+		}
+		if (mp_tp->mpt_version == MPTCP_VERSION_1) {
+			*flags |= CIF_MP_V1;
 		}
 
 		*src_len = 0;
@@ -615,16 +604,24 @@ mptcp_getconninfo(struct mptses *mpte, sae_connid_t *cid, uint32_t *flags,
 		if (mpts->mpts_flags & MPTSF_ACTIVE) {
 			*flags |= CIF_MP_ACTIVE;
 		}
+		if (mp_tp->mpt_version == MPTCP_VERSION_1) {
+			*flags |= CIF_MP_V1;
+		}
 
 		return 0;
 	} else {
 		/* Per-interface stats */
-		const struct mptsub *mpts, *orig_mpts;
+		const struct mptsub *mpts, *orig_mpts = NULL;
 		struct conninfo_tcp tcp_ci;
 		const struct inpcb *inp;
 		struct socket *so;
 		int error = 0;
 		int index;
+
+		/* cid is thus an ifindex - range-check first! */
+		if (*cid > USHRT_MAX) {
+			return EINVAL;
+		}
 
 		bzero(&tcp_ci, sizeof(tcp_ci));
 
@@ -674,6 +671,9 @@ mptcp_getconninfo(struct mptses *mpte, sae_connid_t *cid, uint32_t *flags,
 		}
 		if (mpts->mpts_flags & MPTSF_ACTIVE) {
 			*flags |= CIF_MP_ACTIVE;
+		}
+		if (mp_tp->mpt_version == MPTCP_VERSION_1) {
+			*flags |= CIF_MP_V1;
 		}
 
 		/*
@@ -741,7 +741,7 @@ interface_info:
 			 * nor anything in the stats, return EINVAL. Because the
 			 * ifindex belongs to something that doesn't exist.
 			 */
-			index = mptcpstats_get_index_by_ifindex(mpte->mpte_itfstats, *cid, false);
+			index = mptcpstats_get_index_by_ifindex(mpte->mpte_itfstats, (u_short)(*cid), false);
 			if (index == -1) {
 				os_log_error(mptcp_log_handle,
 				    "%s - %lx: Asking for too many ifindex: %u subcount %u, mpts? %s\n",
@@ -825,7 +825,7 @@ mptcp_usr_control(struct socket *mp_so, u_long cmd, caddr_t data,
 		struct so_aidreq64 aidr;
 		bcopy(data, &aidr, sizeof(aidr));
 		error = mptcp_getassocids(mpte, &aidr.sar_cnt,
-		    aidr.sar_aidp);
+		    (user_addr_t)aidr.sar_aidp);
 		if (error == 0) {
 			bcopy(&aidr, data, sizeof(aidr));
 		}
@@ -847,7 +847,7 @@ mptcp_usr_control(struct socket *mp_so, u_long cmd, caddr_t data,
 		struct so_cidreq64 cidr;
 		bcopy(data, &cidr, sizeof(cidr));
 		error = mptcp_getconnids(mpte, cidr.scr_aid, &cidr.scr_cnt,
-		    cidr.scr_cidp);
+		    (user_addr_t)cidr.scr_cidp);
 		if (error == 0) {
 			bcopy(&cidr, data, sizeof(cidr));
 		}
@@ -873,8 +873,9 @@ mptcp_usr_control(struct socket *mp_so, u_long cmd, caddr_t data,
 		bcopy(data, &cifr, sizeof(cifr));
 		error = mptcp_getconninfo(mpte, &cifr.scir_cid,
 		    &cifr.scir_flags, &cifr.scir_ifindex, &cifr.scir_error,
-		    cifr.scir_src, &cifr.scir_src_len, cifr.scir_dst,
-		    &cifr.scir_dst_len, &cifr.scir_aux_type, cifr.scir_aux_data,
+		    (user_addr_t)cifr.scir_src, &cifr.scir_src_len,
+		    (user_addr_t)cifr.scir_dst, &cifr.scir_dst_len,
+		    &cifr.scir_aux_type, (user_addr_t)cifr.scir_aux_data,
 		    &cifr.scir_aux_len);
 		if (error == 0) {
 			bcopy(&cifr, data, sizeof(cifr));
@@ -904,7 +905,7 @@ mptcp_disconnect(struct mptses *mpte)
 	    struct socket *, mp_so, struct mptcb *, mp_tp);
 
 	/* if we're not detached, go thru socket state checks */
-	if (!(mp_so->so_flags & SOF_PCBCLEARING)) {
+	if (!(mp_so->so_flags & SOF_PCBCLEARING) && !(mp_so->so_flags & SOF_DEFUNCT)) {
 		if (!(mp_so->so_state & (SS_ISCONNECTED |
 		    SS_ISCONNECTING))) {
 			error = ENOTCONN;
@@ -970,7 +971,7 @@ mptcp_finish_usrclosed(struct mptses *mpte)
 	struct mptcb *mp_tp = mpte->mpte_mptcb;
 	struct socket *mp_so = mptetoso(mpte);
 
-	if (mp_tp->mpt_state == MPTCPS_CLOSED) {
+	if (mp_tp->mpt_state == MPTCPS_CLOSED || mp_tp->mpt_state == MPTCPS_TERMINATE) {
 		mpte = mptcp_close(mpte, mp_tp);
 	} else if (mp_tp->mpt_state >= MPTCPS_FIN_WAIT_2) {
 		soisdisconnected(mp_so);
@@ -999,7 +1000,8 @@ mptcp_usrclosed(struct mptses *mpte)
 	mptcp_close_fsm(mp_tp, MPCE_CLOSE);
 
 	/* Not everything has been acknowledged - don't close the subflows! */
-	if (mp_tp->mpt_sndnxt + 1 != mp_tp->mpt_sndmax) {
+	if (mp_tp->mpt_state != MPTCPS_TERMINATE &&
+	    mp_tp->mpt_sndnxt + 1 != mp_tp->mpt_sndmax) {
 		return mpte;
 	}
 
@@ -1141,12 +1143,11 @@ out:
  * Copy the contents of uio into a properly sized mbuf chain.
  */
 static int
-mptcp_uiotombuf(struct uio *uio, int how, int space, uint32_t align,
-    struct mbuf **top)
+mptcp_uiotombuf(struct uio *uio, int how, user_ssize_t space, struct mbuf **top)
 {
 	struct mbuf *m, *mb, *nm = NULL, *mtail = NULL;
-	user_ssize_t resid, tot, len, progress; /* must be user_ssize_t */
-	int error;
+	int progress, len, error;
+	user_ssize_t resid, tot;
 
 	VERIFY(top != NULL && *top == NULL);
 
@@ -1156,24 +1157,17 @@ mptcp_uiotombuf(struct uio *uio, int how, int space, uint32_t align,
 	 */
 	resid = uio_resid(uio);
 	if (space > 0) {
-		tot = imin(resid, space);
+		tot = MIN(resid, space);
 	} else {
 		tot = resid;
 	}
 
-	/*
-	 * The smallest unit is a single mbuf with pkthdr.
-	 * We can't align past it.
-	 */
-	if (align >= MHLEN) {
+	if (tot < 0 || tot > INT_MAX) {
 		return EINVAL;
 	}
 
-	/*
-	 * Give us the full allocation or nothing.
-	 * If space is zero return the smallest empty mbuf.
-	 */
-	if ((len = tot + align) == 0) {
+	len = (int)tot;
+	if (len == 0) {
 		len = 1;
 	}
 
@@ -1214,12 +1208,12 @@ mptcp_uiotombuf(struct uio *uio, int how, int space, uint32_t align,
 	}
 
 	m = nm;
-	m->m_data += align;
 
 	progress = 0;
 	/* Fill all mbufs with uio data and update header information. */
 	for (mb = m; mb != NULL; mb = mb->m_next) {
-		len = imin(M_TRAILINGSPACE(mb), tot - progress);
+		/* tot >= 0 && tot <= INT_MAX (see above) */
+		len = MIN((int)M_TRAILINGSPACE(mb), (int)(tot - progress));
 
 		error = uiomove(mtod(mb, char *), len, uio);
 		if (error != 0) {
@@ -1246,8 +1240,7 @@ mptcp_usr_sosend(struct socket *mp_so, struct sockaddr *addr, struct uio *uio,
     struct mbuf *top, struct mbuf *control, int flags)
 {
 #pragma unused(addr)
-	int32_t space;
-	user_ssize_t resid;
+	user_ssize_t resid, space;
 	int error, sendflags;
 	struct proc *p = current_proc();
 	int sblocked = 0;
@@ -1266,8 +1259,7 @@ mptcp_usr_sosend(struct socket *mp_so, struct sockaddr *addr, struct uio *uio,
 	VERIFY(mp_so->so_type == SOCK_STREAM);
 	VERIFY(!(mp_so->so_flags & SOF_MP_SUBFLOW));
 
-	if ((flags & (MSG_OOB | MSG_DONTROUTE)) ||
-	    (mp_so->so_flags & SOF_ENABLE_MSGS)) {
+	if (flags & (MSG_OOB | MSG_DONTROUTE)) {
 		error = EOPNOTSUPP;
 		socket_unlock(mp_so, 1);
 		goto out;
@@ -1280,7 +1272,8 @@ mptcp_usr_sosend(struct socket *mp_so, struct sockaddr *addr, struct uio *uio,
 	 * hand, a negative resid causes us to loop sending 0-length
 	 * segments to the protocol.
 	 */
-	if (resid < 0 || (flags & MSG_EOR) || control != NULL) {
+	if (resid < 0 || resid > INT_MAX ||
+	    (flags & MSG_EOR) || control != NULL) {
 		error = EINVAL;
 		socket_unlock(mp_so, 1);
 		goto out;
@@ -1290,7 +1283,7 @@ mptcp_usr_sosend(struct socket *mp_so, struct sockaddr *addr, struct uio *uio,
 
 	do {
 		error = sosendcheck(mp_so, NULL, resid, 0, 0, flags,
-		    &sblocked, NULL);
+		    &sblocked);
 		if (error != 0) {
 			goto release;
 		}
@@ -1301,7 +1294,7 @@ mptcp_usr_sosend(struct socket *mp_so, struct sockaddr *addr, struct uio *uio,
 			/*
 			 * Copy the data from userland into an mbuf chain.
 			 */
-			error = mptcp_uiotombuf(uio, M_WAITOK, space, 0, &top);
+			error = mptcp_uiotombuf(uio, M_WAITOK, space, &top);
 			if (error != 0) {
 				socket_lock(mp_so, 0);
 				goto release;
@@ -1443,6 +1436,11 @@ mptcp_usr_socheckopt(struct socket *mp_so, struct sockopt *sopt)
 	case SO_NOWAKEFROMSLEEP:
 	case SO_NOAPNFALLBK:
 	case SO_MARK_CELLFALLBACK:
+	case SO_MARK_CELLFALLBACK_UUID:
+	case SO_MARK_KNOWN_TRACKER:
+	case SO_MARK_KNOWN_TRACKER_NON_APP_INITIATED:
+	case SO_MARK_APPROVED_APP_DOMAIN:
+	case SO_FALLBACK_MODE:
 		/*
 		 * Tell the caller that these options are to be processed;
 		 * these will also be recorded later by mptcp_setopt().
@@ -1586,6 +1584,9 @@ mptcp_setopt(struct mptses *mpte, struct sockopt *sopt)
 
 	mp_so = mptetoso(mpte);
 
+	VERIFY(!(mpsotomppcb(mp_so)->mpp_flags & MPP_INSIDE_SETGETOPT));
+	mpsotomppcb(mp_so)->mpp_flags |= MPP_INSIDE_SETGETOPT;
+
 	/*
 	 * Record socket options which are applicable to subflow sockets so
 	 * that we can replay them for new ones; see mptcp_usr_socheckopt()
@@ -1605,6 +1606,10 @@ mptcp_setopt(struct mptses *mpte, struct sockopt *sopt)
 		case SO_NOWAKEFROMSLEEP:
 		case SO_NOAPNFALLBK:
 		case SO_MARK_CELLFALLBACK:
+		case SO_MARK_KNOWN_TRACKER:
+		case SO_MARK_KNOWN_TRACKER_NON_APP_INITIATED:
+		case SO_MARK_APPROVED_APP_DOMAIN:
+		case SO_FALLBACK_MODE:
 			/* record it */
 			break;
 		case SO_FLUSH:
@@ -1657,6 +1662,12 @@ mptcp_setopt(struct mptses *mpte, struct sockopt *sopt)
 
 			goto out;
 		case SO_NECP_ATTRIBUTES:
+			error = necp_set_socket_attributes(&mpsotomppcb(mp_so)->inp_necp_attributes, sopt);
+			if (error) {
+				goto err_out;
+			}
+
+			goto out;
 #endif /* NECP */
 		default:
 			/* nothing to do; just return */
@@ -1674,6 +1685,7 @@ mptcp_setopt(struct mptses *mpte, struct sockopt *sopt)
 		case PERSIST_TIMEOUT:
 		case TCP_ADAPTIVE_READ_TIMEOUT:
 		case TCP_ADAPTIVE_WRITE_TIMEOUT:
+		case TCP_FASTOPEN_FORCE_ENABLE:
 			/* eligible; record it */
 			break;
 		case TCP_NOTSENT_LOWAT:
@@ -1713,12 +1725,12 @@ mptcp_setopt(struct mptses *mpte, struct sockopt *sopt)
 				goto err_out;
 			}
 
-			if (mptcp_entitlement_check(mp_so, optval) < 0) {
+			if (mptcp_entitlement_check(mp_so, (uint8_t)optval) < 0) {
 				error = EACCES;
 				goto err_out;
 			}
 
-			mpte->mpte_svctype = optval;
+			mpte->mpte_svctype = (uint8_t)optval;
 			mpte->mpte_flags |= MPTE_SVCTYPE_CHECKED;
 
 			goto out;
@@ -1735,7 +1747,7 @@ mptcp_setopt(struct mptses *mpte, struct sockopt *sopt)
 				goto err_out;
 			}
 
-			mpte->mpte_alternate_port = optval;
+			mpte->mpte_alternate_port = (uint16_t)optval;
 
 			goto out;
 		case MPTCP_FORCE_ENABLE:
@@ -1755,6 +1767,27 @@ mptcp_setopt(struct mptses *mpte, struct sockopt *sopt)
 				mpte->mpte_flags |= MPTE_FORCE_ENABLE;
 			} else {
 				mpte->mpte_flags &= ~MPTE_FORCE_ENABLE;
+			}
+
+			goto out;
+		case MPTCP_FORCE_VERSION:
+			error = sooptcopyin(sopt, &optval, sizeof(optval),
+			    sizeof(optval));
+			if (error) {
+				goto err_out;
+			}
+
+			if (optval != 0 && optval != 1) {
+				error = EINVAL;
+				goto err_out;
+			}
+
+			if (optval == 0) {
+				mpte->mpte_flags |= MPTE_FORCE_V0;
+				mpte->mpte_flags &= ~MPTE_FORCE_V1;
+			} else {
+				mpte->mpte_flags |= MPTE_FORCE_V1;
+				mpte->mpte_flags &= ~MPTE_FORCE_V0;
 			}
 
 			goto out;
@@ -1830,7 +1863,7 @@ mptcp_setopt(struct mptses *mpte, struct sockopt *sopt)
 	if (rec) {
 		/* search for an existing one; if not found, allocate */
 		if ((mpo = mptcp_sopt_find(mpte, sopt)) == NULL) {
-			mpo = mptcp_sopt_alloc(M_WAITOK);
+			mpo = mptcp_sopt_alloc(Z_WAITOK);
 		}
 
 		if (mpo == NULL) {
@@ -1873,12 +1906,14 @@ mptcp_setopt(struct mptses *mpte, struct sockopt *sopt)
 
 out:
 
+	mpsotomppcb(mp_so)->mpp_flags &= ~MPP_INSIDE_SETGETOPT;
 	return 0;
 
 err_out:
 	os_log_error(mptcp_log_handle, "%s - %lx: sopt %s (%d, %d) val %d can't be issued error %d\n",
 	    __func__, (unsigned long)VM_KERNEL_ADDRPERM(mpte),
 	    mptcp_sopt2str(level, optname), level, optname, optval, error);
+	mpsotomppcb(mp_so)->mpp_flags &= ~MPP_INSIDE_SETGETOPT;
 	return error;
 }
 
@@ -1935,7 +1970,7 @@ mptcp_fill_info(struct mptses *mpte, struct tcp_info *ti)
 
 	bzero(ti, sizeof(*ti));
 
-	ti->tcpi_state = mp_tp->mpt_state;
+	ti->tcpi_state = (uint8_t)mp_tp->mpt_state;
 	/* tcpi_options */
 	/* tcpi_snd_wscale */
 	/* tcpi_rcv_wscale */
@@ -1951,13 +1986,14 @@ mptcp_fill_info(struct mptses *mpte, struct tcp_info *ti)
 		ti->tcpi_srtt = acttp->t_srtt >> TCP_RTT_SHIFT;
 		ti->tcpi_rttvar = acttp->t_rttvar >> TCP_RTTVAR_SHIFT;
 		ti->tcpi_rttbest = acttp->t_rttbest >> TCP_RTT_SHIFT;
+		ti->tcpi_rcv_srtt = acttp->rcv_srtt >> TCP_RTT_SHIFT;
 	}
 	/* tcpi_snd_ssthresh */
 	/* tcpi_snd_cwnd */
 	/* tcpi_rcv_space */
 	ti->tcpi_snd_wnd = mp_tp->mpt_sndwnd;
-	ti->tcpi_snd_nxt = mp_tp->mpt_sndnxt;
-	ti->tcpi_rcv_nxt = mp_tp->mpt_rcvnxt;
+	ti->tcpi_snd_nxt = (uint32_t)mp_tp->mpt_sndnxt;
+	ti->tcpi_rcv_nxt = (uint32_t)mp_tp->mpt_rcvnxt;
 	if (acttp) {
 		ti->tcpi_last_outif = (acttp->t_inpcb->inp_last_outifp == NULL) ? 0 :
 		    acttp->t_inpcb->inp_last_outifp->if_index;
@@ -2012,6 +2048,12 @@ static int
 mptcp_getopt(struct mptses *mpte, struct sockopt *sopt)
 {
 	int error = 0, optval = 0;
+	struct socket *mp_so;
+
+	mp_so = mptetoso(mpte);
+
+	VERIFY(!(mpsotomppcb(mp_so)->mpp_flags & MPP_INSIDE_SETGETOPT));
+	mpsotomppcb(mp_so)->mpp_flags |= MPP_INSIDE_SETGETOPT;
 
 	/*
 	 * We only handle SOPT_GET for TCP level socket options; we should
@@ -2027,6 +2069,7 @@ mptcp_getopt(struct mptses *mpte, struct sockopt *sopt)
 	case PERSIST_TIMEOUT:
 		/* Only case for which we have a non-zero default */
 		optval = tcp_max_persist_timeout;
+		OS_FALLTHROUGH;
 	case TCP_NODELAY:
 	case TCP_RXT_FINDROP:
 	case TCP_KEEPALIVE:
@@ -2036,6 +2079,7 @@ mptcp_getopt(struct mptses *mpte, struct sockopt *sopt)
 	case TCP_RXT_CONNDROPTIME:
 	case TCP_ADAPTIVE_READ_TIMEOUT:
 	case TCP_ADAPTIVE_WRITE_TIMEOUT:
+	case TCP_FASTOPEN_FORCE_ENABLE:
 	{
 		struct mptopt *mpo = mptcp_sopt_find(mpte, sopt);
 
@@ -2071,6 +2115,15 @@ mptcp_getopt(struct mptses *mpte, struct sockopt *sopt)
 	case MPTCP_FORCE_ENABLE:
 		optval = !!(mpte->mpte_flags & MPTE_FORCE_ENABLE);
 		break;
+	case MPTCP_FORCE_VERSION:
+		if (mpte->mpte_flags & MPTE_FORCE_V0) {
+			optval = 0;
+		} else if (mpte->mpte_flags & MPTE_FORCE_V1) {
+			optval = 1;
+		} else {
+			optval = -1;
+		}
+		break;
 	case MPTCP_EXPECTED_PROGRESS_TARGET:
 		error = sooptcopyout(sopt, &mpte->mpte_time_target, sizeof(mpte->mpte_time_target));
 
@@ -2086,6 +2139,7 @@ mptcp_getopt(struct mptses *mpte, struct sockopt *sopt)
 	}
 
 out:
+	mpsotomppcb(mp_so)->mpp_flags &= ~MPP_INSIDE_SETGETOPT;
 	return error;
 }
 
@@ -2203,6 +2257,14 @@ mptcp_sopt2str(int level, int optname)
 			return "SO_NOAPNFALLBK";
 		case SO_MARK_CELLFALLBACK:
 			return "SO_CELLFALLBACK";
+		case SO_FALLBACK_MODE:
+			return "SO_FALLBACK_MODE";
+		case SO_MARK_KNOWN_TRACKER:
+			return "SO_MARK_KNOWN_TRACKER";
+		case SO_MARK_KNOWN_TRACKER_NON_APP_INITIATED:
+			return "SO_MARK_KNOWN_TRACKER_NON_APP_INITIATED";
+		case SO_MARK_APPROVED_APP_DOMAIN:
+			return "SO_MARK_APPROVED_APP_DOMAIN";
 		case SO_DELEGATED:
 			return "SO_DELEGATED";
 		case SO_DELEGATED_UUID:
@@ -2238,12 +2300,16 @@ mptcp_sopt2str(int level, int optname)
 			return "ADAPTIVE_READ_TIMEOUT";
 		case TCP_ADAPTIVE_WRITE_TIMEOUT:
 			return "ADAPTIVE_WRITE_TIMEOUT";
+		case TCP_FASTOPEN_FORCE_ENABLE:
+			return "TCP_FASTOPEN_FORCE_ENABLE";
 		case MPTCP_SERVICE_TYPE:
 			return "MPTCP_SERVICE_TYPE";
 		case MPTCP_ALTERNATE_PORT:
 			return "MPTCP_ALTERNATE_PORT";
 		case MPTCP_FORCE_ENABLE:
 			return "MPTCP_FORCE_ENABLE";
+		case MPTCP_FORCE_VERSION:
+			return "MPTCP_FORCE_VERSION";
 		case MPTCP_EXPECTED_PROGRESS_TARGET:
 			return "MPTCP_EXPECTED_PROGRESS_TARGET";
 		}

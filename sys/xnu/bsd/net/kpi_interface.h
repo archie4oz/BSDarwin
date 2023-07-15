@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2004-2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2004-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -57,11 +57,11 @@ struct ifnet_interface_advisory;
 #endif /* PRIVATE */
 
 #ifdef XNU_KERNEL_PRIVATE
-#if CONFIG_EMBEDDED
+#if !XNU_TARGET_OS_OSX
 #define KPI_INTERFACE_EMBEDDED 1
-#else
+#else /* XNU_TARGET_OS_OSX && !(TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR) */
 #define KPI_INTERFACE_EMBEDDED 0
-#endif
+#endif /* XNU_TARGET_OS_OSX && !(TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR) */
 #else
 #if (TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR)
 #define KPI_INTERFACE_EMBEDDED 1
@@ -96,7 +96,6 @@ struct ifnet_demux_desc;
  *       @constant IFNET_FAMILY_FIREWIRE An IEEE 1394 [Firewire] interface.
  *       @constant IFNET_FAMILY_BOND A virtual bonded interface.
  *       @constant IFNET_FAMILY_CELLULAR A cellular interface.
- *       @constant IFNET_FAMILY_6LOWPAN A 6LoWPAN interface.
  *       @constant IFNET_FAMILY_UTUN A utun interface.
  *       @constant IFNET_FAMILY_IPSEC An IPsec interface.
  */
@@ -117,7 +116,7 @@ enum {
 	IFNET_FAMILY_FIREWIRE           = 13,
 	IFNET_FAMILY_BOND               = 14,
 	IFNET_FAMILY_CELLULAR           = 15,
-	IFNET_FAMILY_6LOWPAN            = 16,
+	IFNET_FAMILY_UNUSED_16          = 16,   /* Un-used */
 	IFNET_FAMILY_UTUN               = 17,
 	IFNET_FAMILY_IPSEC              = 18
 };
@@ -147,6 +146,8 @@ enum {
 	IFNET_SUBFAMILY_INTCOPROC       = 6,
 	IFNET_SUBFAMILY_QUICKRELAY      = 7,
 	IFNET_SUBFAMILY_DEFAULT         = 8,
+	IFNET_SUBFAMILY_VMNET           = 9,
+	IFNET_SUBFAMILY_SIMCELL         = 10,
 };
 
 /*
@@ -214,19 +215,23 @@ typedef u_int32_t protocol_family_t;
  *       @constant IFNET_TSO_IPV4 Hardware supports IPv4 TCP Segment Offloading.
  *               If the Interface driver sets this flag, TCP will send larger frames (up to 64KB) as one
  *               frame to the adapter which will perform the final packetization. The maximum TSO segment
- *               supported by the interface can be set with "ifnet_set_tso_mtu". To retreive the real MTU
+ *               supported by the interface can be set with "ifnet_set_tso_mtu". To retrieve the real MTU
  *               for the TCP connection the function "mbuf_get_tso_requested" is used by the driver. Note
  *               that if TSO is active, all the packets will be flagged for TSO, not just large packets.
  *       @constant IFNET_TSO_IPV6 Hardware supports IPv6 TCP Segment Offloading.
  *               If the Interface driver sets this flag, TCP IPv6 will send larger frames (up to 64KB) as one
  *               frame to the adapter which will perform the final packetization. The maximum TSO segment
- *               supported by the interface can be set with "ifnet_set_tso_mtu". To retreive the real MTU
+ *               supported by the interface can be set with "ifnet_set_tso_mtu". To retrieve the real MTU
  *               for the TCP IPv6 connection the function "mbuf_get_tso_requested" is used by the driver.
  *               Note that if TSO is active, all the packets will be flagged for TSO, not just large packets.
  *       @constant IFNET_TX_STATUS Driver supports returning a per packet
  *               transmission status (pass, fail or other errors) of whether
  *               the packet was successfully transmitted on the link, or the
  *               transmission was aborted, or transmission failed.
+ *       @constant IFNET_HW_TIMESTAMP Driver supports time stamping in hardware.
+ *       @constant IFNET_SW_TIMESTAMP Driver supports time stamping in software.
+ *       @constant IFNET_LRO Driver supports TCP Large Receive Offload.
+ *       @constant IFNET_RX_CSUM Driver supports receive checksum offload.
  *
  */
 
@@ -251,7 +256,9 @@ enum {
 	IFNET_TSO_IPV6          = 0x00400000,
 	IFNET_TX_STATUS         = 0x00800000,
 	IFNET_HW_TIMESTAMP      = 0x01000000,
-	IFNET_SW_TIMESTAMP      = 0x02000000
+	IFNET_SW_TIMESTAMP      = 0x02000000,
+	IFNET_LRO               = 0x10000000,
+	IFNET_RX_CSUM           = 0x20000000,
 };
 /*!
  *       @typedef ifnet_offload_t
@@ -724,6 +731,8 @@ struct ifnet_init_params {
 #define IFNET_INIT_INPUT_POLL   0x2     /* opportunistic input polling model */
 #define IFNET_INIT_NX_NOAUTO    0x4     /* do not auto config nexus */
 #define IFNET_INIT_ALLOC_KPI    0x8     /* allocated via the ifnet_alloc() KPI */
+#define IFNET_INIT_IF_ADV               0x40000000      /* Supports Interface advisory reporting */
+#define IFNET_INIT_SKYWALK_NATIVE       0x80000000      /* native Skywalk driver */
 
 /*
  *       @typedef ifnet_pre_enqueue_func
@@ -772,6 +781,15 @@ typedef void (*ifnet_start_func)(ifnet_t interface);
 typedef void (*ifnet_input_poll_func)(ifnet_t interface, u_int32_t flags,
     u_int32_t max_count, mbuf_t *first_packet, mbuf_t *last_packet,
     u_int32_t *cnt, u_int32_t *len);
+
+/*!
+ *       @typedef ifnet_free_func
+ *       @discussion ifnet_free_func is called as an alternative to ifnet_detach_func
+ *               on a specific interface. Implementors of this callback are responsible
+ *               for fully tearing down the interface.
+ *       @param interface The interface that should be freed
+ */
+typedef void (*ifnet_free_func)(ifnet_t interface);
 
 /*
  *       @enum Interface control commands
@@ -1127,10 +1145,12 @@ struct ifnet_init_eparams {
 	u_int16_t               tx_trailer;             /* optional */
 	u_int32_t               rx_mit_ival;            /* optional */
 #if !defined(__LP64__)
-	u_int64_t               ____reserved[2];        /* for future use */
+	ifnet_free_func         free;                   /* optional */
+	u_int32_t               _____reserved;          /* for future use */
+	u_int64_t               ____reserved[1];        /* for future use */
 #else
 	u_int32_t               ____reserved;           /* for future use */
-	u_int64_t               _____reserved[1];       /* for future use */
+	ifnet_free_func         free;                   /* optional */
 #endif /* __LP64__ */
 };
 #endif /* KERNEL_PRIVATE */
@@ -1284,6 +1304,14 @@ __NKE_API_DEPRECATED;
  */
 extern errno_t ifnet_allocate_extended(const struct ifnet_init_eparams *init,
     ifnet_t *interface);
+
+/*
+ *       @function ifnet_dispose
+ *       @discusion Dispose the interface. This is meant to only be called
+ *                  by clients that implement ifnet_free_func
+ *       @param interface The interface to dispose
+ */
+extern void ifnet_dispose(ifnet_t interface);
 
 /*
  *       @function ifnet_purge
@@ -2666,7 +2694,7 @@ __NKE_API_DEPRECATED;
  *               promiscuous mode only once for every time you enable it.
  *       @param interface The interface to toggle promiscuous mode on.
  *       @param on If set, the number of promicuous on requests will be
- *               incremented. If this is the first requrest, promiscuous mode
+ *               incremented. If this is the first request, promiscuous mode
  *               will be enabled. If this is not set, the number of promiscous
  *               clients will be decremented. If this causes the number to reach
  *               zero, promiscuous mode will be disabled.
@@ -3460,13 +3488,19 @@ ifnet_notice_node_presence_v2(ifnet_t ifp, struct sockaddr *sa, struct sockaddr_
     int lqm, int npm, u_int8_t srvinfo[48]);
 
 /*
- *       @function ifnet_notice_master_elected
+ *       @function ifnet_notice_primary_elected
  *       @discussion Provided for network interface drivers to notify the system
  *               that the nodes with a locally detected presence on the attached
- *               link have elected a new master.
- *       @param ifp The interface attached to the link where the new master has
+ *               link have elected a new primary.
+ *       @param ifp The interface attached to the link where the new primary has
  *               been elected.
  *       @result Returns 0 on success, or EINVAL if arguments are invalid.
+ */
+extern errno_t ifnet_notice_primary_elected(ifnet_t ifp);
+
+/*
+ *       @function ifnet_notice_master_elected
+ *       @discussion Obsolete, use ifnet_notice_primary_elected instead
  */
 extern errno_t ifnet_notice_master_elected(ifnet_t ifp);
 
@@ -3746,23 +3780,9 @@ extern errno_t ifnet_touch_lastupdown(ifnet_t interface);
  */
 extern errno_t ifnet_updown_delta(ifnet_t interface, struct timeval *updown_delta);
 
-/*************************************************************************/
-/* Interface advisory notifications                                      */
-/*************************************************************************/
-/*!
- *       @function ifnet_interface_advisory_report
- *       @discussion KPI to let the driver provide interface advisory
- *       notifications to the user space.
- *       @param ifp The interface that is generating the advisory report.
- *       @param advisory structure containing the advisory notification
- *              information.
- *       @result Returns 0 on success, error number otherwise.
- */
-extern errno_t ifnet_interface_advisory_report(ifnet_t ifp,
-    const struct ifnet_interface_advisory *advisory);
-
 #endif /* KERNEL_PRIVATE */
 
 __END_DECLS
 
+#undef __NKE_API_DEPRECATED
 #endif /* __KPI_INTERFACE__ */

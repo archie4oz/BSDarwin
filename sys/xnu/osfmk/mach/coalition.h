@@ -31,8 +31,11 @@
 
 /* code shared by userspace and xnu */
 
-#define COALITION_CREATE_FLAGS_MASK       ((uint32_t)0xFF1)
+#define COALITION_SPAWN_ENTITLEMENT "com.apple.private.coalition-spawn"
+
+#define COALITION_CREATE_FLAGS_MASK       ((uint32_t)0xFF3)
 #define COALITION_CREATE_FLAGS_PRIVILEGED ((uint32_t)0x01)
+#define COALITION_CREATE_FLAGS_EFFICIENT  ((uint32_t)0x02)
 
 #define COALITION_CREATE_FLAGS_TYPE_MASK  ((uint32_t)0xF0)
 #define COALITION_CREATE_FLAGS_TYPE_SHIFT (4)
@@ -101,25 +104,8 @@
 
 #define COALITION_NUM_THREAD_QOS_TYPES   7
 
-/* Coalition Efficiency Interface Support */
-
-/* Flags for coalition efficiency */
+/* Flags for coalition efficiency (Deprecated) */
 #define COALITION_FLAGS_EFFICIENT       (0x1)
-
-/*
- * Mapping of launchd plist values to coalition efficiency flags.
- * Launchd uses this mapping to pass the correct flags to
- * coalition_info_set_efficiency(cid, flags);
- *
- * Current supported values mapping:
- * { "Efficient" : COALITION_FLAGS_EFFICIENT, }
- */
-static const char *coalition_efficiency_names[] = {
-	"Efficient",
-};
-static const uint64_t coalition_efficiency_flags[] = {
-	COALITION_FLAGS_EFFICIENT,
-};
 
 struct coalition_resource_usage {
 	uint64_t tasks_started;
@@ -149,10 +135,17 @@ struct coalition_resource_usage {
 	uint64_t cpu_time_eqos[COALITION_NUM_THREAD_QOS_TYPES];
 	uint64_t cpu_instructions;
 	uint64_t cpu_cycles;
+	uint64_t fs_metadata_writes;
+	uint64_t pm_writes;
+	uint64_t cpu_pinstructions;
+	uint64_t cpu_pcycles;
 };
 
 #ifdef PRIVATE
 /* definitions shared by only xnu + Libsyscall */
+
+/* coalition id for kernel task */
+#define COALITION_ID_KERNEL 1
 
 /* Syscall flavors */
 #define COALITION_OP_CREATE 1

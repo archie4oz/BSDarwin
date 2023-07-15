@@ -80,10 +80,33 @@ void ml_install_interrupt_handler(
 	IOInterruptHandler handler,
 	void *refCon);
 
-void ml_entropy_collect(void);
-
 uint64_t ml_get_timebase(void);
-void ml_init_lock_timeout(void);
+uint64_t ml_get_timebase_entropy(void);
+
+#if MACH_KERNEL_PRIVATE
+/**
+ * Issue a barrier that guarantees all prior memory accesses will complete
+ * before any subsequent timebase reads.
+ */
+static inline void
+ml_memory_to_timebase_fence(void)
+{
+	/*
+	 * No-op on x86.  mach_absolute_time() & co. have load and lfence
+	 * instructions that already guarantee this ordering.
+	 */
+}
+
+/**
+ * Issue a barrier that guarantees all prior timebase reads will
+ * be ordered before any subsequent memory accesses.
+ */
+static inline void
+ml_timebase_to_memory_fence(void)
+{
+}
+#endif /* MACH_KERNEL_PRIVATE */
+
 void ml_init_delay_spin_threshold(int);
 
 boolean_t ml_delay_should_spin(uint64_t interval);
@@ -98,15 +121,15 @@ void ml_static_mfree(
 	vm_offset_t,
 	vm_size_t);
 
-/* boot memory allocation */
-vm_offset_t ml_static_malloc(
-	vm_size_t size);
+kern_return_t
+ml_static_protect(
+	vm_offset_t start,
+	vm_size_t size,
+	vm_prot_t new_prot);
 
-vm_offset_t ml_static_slide(
-	vm_offset_t vaddr);
-
-vm_offset_t ml_static_unslide(
-	vm_offset_t vaddr);
+kern_return_t
+ml_static_verify_page_protections(
+	uint64_t base, uint64_t size, vm_prot_t prot);
 
 /* virtual to physical on wired pages */
 vm_offset_t ml_vtophys(
@@ -119,15 +142,21 @@ boolean_t ml_validate_nofault(
 	vm_offset_t virtsrc, vm_size_t size);
 
 /* Machine topology info */
-uint64_t ml_cpu_cache_size(unsigned int level);
-uint64_t ml_cpu_cache_sharing(unsigned int level);
+typedef enum {
+	CLUSTER_TYPE_SMP,
+	MAX_CPU_TYPES,
+} cluster_type_t;
 
-/* Initialize the maximum number of CPUs */
-void ml_init_max_cpus(
-	unsigned long max_cpus);
+uint64_t ml_cpu_cache_size(unsigned int level);
+
+/* Set the maximum number of CPUs */
+void ml_set_max_cpus(
+	unsigned int max_cpus);
 
 extern void     ml_cpu_up(void);
 extern void     ml_cpu_down(void);
+extern void     ml_cpu_up_update_counts(int cpu_id);
+extern void     ml_cpu_down_update_counts(int cpu_id);
 
 void bzero_phys_nc(
 	addr64_t phys_address,
@@ -144,11 +173,26 @@ extern uint32_t idle_entry_timer_processing_hdeadline_threshold;
 #if     defined(PEXPERT_KERNEL_PRIVATE) || defined(MACH_KERNEL_PRIVATE)
 /* IO memory map services */
 
+extern vm_offset_t      io_map(
+	vm_map_offset_t         phys_addr,
+	vm_size_t               size,
+	unsigned int            flags,
+	vm_prot_t               prot,
+	bool                    unmappable);
+
 /* Map memory map IO space */
 vm_offset_t ml_io_map(
 	vm_offset_t phys_addr,
 	vm_size_t size);
 
+vm_offset_t ml_io_map_wcomb(
+	vm_offset_t phys_addr,
+	vm_size_t size);
+
+vm_offset_t ml_io_map_unmappable(
+	vm_offset_t phys_addr,
+	vm_size_t size,
+	unsigned int flags);
 
 void    ml_get_bouncepool_info(
 	vm_offset_t *phys_addr,
@@ -161,10 +205,8 @@ void plctrace_disable(void);
 /* Warm up a CPU to receive an interrupt */
 kern_return_t ml_interrupt_prewarm(uint64_t deadline);
 
-/* Check if the machine layer wants to intercept a panic call */
-boolean_t ml_wants_panic_trap_to_debugger(void);
-
 /* Machine layer routine for intercepting panics */
+__printflike(1, 0)
 void ml_panic_trap_to_debugger(const char *panic_format_str,
     va_list *panic_args,
     unsigned int reason,
@@ -239,18 +281,6 @@ unsigned long long ml_phys_read_double(
 unsigned long long ml_phys_read_double_64(
 	addr64_t paddr);
 
-unsigned long long ml_io_read(uintptr_t iovaddr, int iovsz);
-unsigned int ml_io_read8(uintptr_t iovaddr);
-unsigned int ml_io_read16(uintptr_t iovaddr);
-unsigned int ml_io_read32(uintptr_t iovaddr);
-unsigned long long ml_io_read64(uintptr_t iovaddr);
-
-extern void ml_io_write(uintptr_t vaddr, uint64_t val, int size);
-extern void ml_io_write8(uintptr_t vaddr, uint8_t val);
-extern void ml_io_write16(uintptr_t vaddr, uint16_t val);
-extern void ml_io_write32(uintptr_t vaddr, uint32_t val);
-extern void ml_io_write64(uintptr_t vaddr, uint64_t val);
-
 extern uint32_t ml_port_io_read(uint16_t ioport, int size);
 extern uint8_t ml_port_io_read8(uint16_t ioport);
 extern uint16_t ml_port_io_read16(uint16_t ioport);
@@ -315,8 +345,8 @@ void ml_thread_policy(
 #define MACHINE_NETWORK_WORKLOOP                0x00000001
 #define MACHINE_NETWORK_NETISR                  0x00000002
 
-/* Return the maximum number of CPUs set by ml_init_max_cpus() */
-int ml_get_max_cpus(
+/* Return the maximum number of CPUs set by ml_set_max_cpus(), blocking if necessary */
+unsigned int ml_wait_max_cpus(
 	void);
 
 /*
@@ -351,6 +381,11 @@ boolean_t ml_at_interrupt_context(void);
 extern boolean_t ml_is_quiescing(void);
 extern void ml_set_is_quiescing(boolean_t);
 extern uint64_t ml_get_booter_memory_size(void);
+unsigned int ml_cpu_cache_sharing(unsigned int level, cluster_type_t cluster_type, bool include_all_cpu_types);
+void ml_cpu_get_info_type(ml_cpu_info_t * ml_cpu_info, cluster_type_t cluster_type);
+unsigned int ml_get_cpu_number_type(cluster_type_t cluster_type, bool logical, bool available);
+unsigned int ml_get_cluster_number_type(cluster_type_t cluster_type);
+unsigned int ml_get_cpu_types(void);
 #endif
 
 /* Zero bytes starting at a physical address */
@@ -361,13 +396,13 @@ void bzero_phys(
 /* Bytes available on current stack */
 vm_offset_t ml_stack_remaining(void);
 
-__END_DECLS
 #if defined(MACH_KERNEL_PRIVATE)
 __private_extern__ uint64_t ml_phys_read_data(uint64_t paddr, int psz);
 __private_extern__ void ml_phys_write_data(uint64_t paddr,
     unsigned long long data, int size);
 __private_extern__ uintptr_t
 pmap_verify_noncacheable(uintptr_t vaddr);
+void machine_lockdown(void);
 #endif /* MACH_KERNEL_PRIVATE */
 #ifdef  XNU_KERNEL_PRIVATE
 
@@ -383,24 +418,39 @@ void timer_queue_expire_rescan(void*);
 void ml_timer_evaluate(void);
 boolean_t ml_timer_forced_evaluation(void);
 
-uint64_t ml_energy_stat(thread_t);
 void ml_gpu_stat_update(uint64_t);
 uint64_t ml_gpu_stat(thread_t);
 boolean_t ml_recent_wake(void);
 
-#define ALL_CORES_RECOMMENDED   (~(uint64_t)0)
+#ifdef MACH_KERNEL_PRIVATE
+struct i386_cpu_info;
+struct machine_thread;
+/* LBR support */
+void i386_lbr_init(struct i386_cpu_info *info_p, bool is_master);
+void i386_switch_lbrs(thread_t old, thread_t new);
+int i386_filtered_lbr_state_to_mach_thread_state(thread_t thr_act, last_branch_state_t *machlbrp, boolean_t from_userspace);
+void i386_lbr_synch(thread_t thr);
+void i386_lbr_enable(void);
+void i386_lbr_disable(void);
+extern lbr_modes_t last_branch_enabled_modes;
+#endif
 
-extern void sched_usercontrol_update_recommended_cores(uint64_t recommended_cores);
+extern uint64_t report_phy_read_delay;
+extern uint64_t report_phy_write_delay;
+extern uint32_t report_phy_read_osbt;
+extern uint32_t report_phy_write_osbt;
+extern uint32_t phy_read_panic;
+extern uint32_t phy_write_panic;
+extern uint64_t trace_phy_read_delay;
+extern uint64_t trace_phy_write_delay;
 
+void ml_hibernate_active_pre(void);
+void ml_hibernate_active_post(void);
 
-extern uint64_t reportphyreaddelayabs;
-extern uint64_t reportphywritedelayabs;
-extern uint32_t reportphyreadosbt;
-extern uint32_t reportphywriteosbt;
-extern uint32_t phyreadpanic;
-extern uint32_t phywritepanic;
-extern uint64_t tracephyreaddelayabs;
-extern uint64_t tracephywritedelayabs;
+int ml_page_protection_type(void);
 
 #endif /* XNU_KERNEL_PRIVATE */
+
+__END_DECLS
+
 #endif /* _I386_MACHINE_ROUTINES_H_ */

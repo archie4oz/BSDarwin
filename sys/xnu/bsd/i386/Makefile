@@ -13,7 +13,7 @@ DATAFILES = \
 	_mcontext.h
 
 DRIVERKIT_DATAFILES = \
-	limits.h types.h _types.h
+	limits.h types.h _types.h endian.h
 
 PRIVATE_DATAFILES = \
 	disklabel.h
@@ -24,9 +24,10 @@ KERNELFILES = \
 	types.h vmparam.h _types.h _param.h \
 	_mcontext.h
 
+# These are covered by ../machine/machine.modulemap.
 INSTALL_MD_LIST = ${DATAFILES}
 INSTALL_DRIVERKIT_MD_LIST = ${DRIVERKIT_DATAFILES}
-INSTALL_MD_LCL_LIST = ${PRIVATE_DATAFILES}
+INSTALL_SF_MD_LCL_LIST = ${DATAFILES} ${PRIVATE_DATAFILES}
 
 INSTALL_MD_DIR = i386
 

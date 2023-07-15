@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -107,6 +107,7 @@
 #if PF
 #include <net/pfvar.h>
 #endif /* PF */
+#include <net/if_ports_used.h>
 
 #include <netinet/in.h>
 #include <netinet/in_systm.h>
@@ -116,21 +117,14 @@
 #include <netinet/in_pcb.h>
 #include <netinet/ip_var.h>
 #include <netinet/ip_icmp.h>
-#include <netinet/ip_fw.h>
-#include <netinet/ip_divert.h>
 #include <netinet/kpi_ipfilter_var.h>
 #include <netinet/udp.h>
 #include <netinet/udp_var.h>
 #include <netinet/bootp.h>
-#include <netinet/lro_ext.h>
 
 #if DUMMYNET
 #include <netinet/ip_dummynet.h>
 #endif /* DUMMYNET */
-
-#if CONFIG_MACF_NET
-#include <security/mac_framework.h>
-#endif /* CONFIG_MACF_NET */
 
 #if IPSEC
 #include <netinet6/ipsec.h>
@@ -145,13 +139,6 @@
 
 #if IPSEC
 extern int ipsec_bypass;
-extern lck_mtx_t *sadb_mutex;
-
-lck_grp_t       *sadb_stat_mutex_grp;
-lck_grp_attr_t  *sadb_stat_mutex_grp_attr;
-lck_attr_t      *sadb_stat_mutex_attr;
-decl_lck_mtx_data(, sadb_stat_mutex_data);
-lck_mtx_t       *sadb_stat_mutex = &sadb_stat_mutex_data;
 #endif /* IPSEC */
 
 MBUFQ_HEAD(fq_head);
@@ -164,12 +151,11 @@ static struct ipq *ipq_alloc(int);
 static void ipq_free(struct ipq *);
 static void ipq_updateparams(void);
 static void ip_input_second_pass(struct mbuf *, struct ifnet *,
-    u_int32_t, int, int, struct ip_fw_in_args *, int);
+    int, int, struct ip_fw_in_args *);
 
-decl_lck_mtx_data(static, ipqlock);
-static lck_attr_t       *ipqlock_attr;
-static lck_grp_t        *ipqlock_grp;
-static lck_grp_attr_t   *ipqlock_grp_attr;
+static LCK_GRP_DECLARE(ipqlock_grp, "ipqlock");
+static LCK_MTX_DECLARE(ipqlock, &ipqlock_grp);
+
 
 /* Packet reassembly stuff */
 #define IPREASS_NHASH_LOG2      6
@@ -333,19 +319,16 @@ static int ipprintfs = 0;
 
 struct protosw *ip_protox[IPPROTO_MAX];
 
-static lck_grp_attr_t   *in_ifaddr_rwlock_grp_attr;
-static lck_grp_t        *in_ifaddr_rwlock_grp;
-static lck_attr_t       *in_ifaddr_rwlock_attr;
-decl_lck_rw_data(, in_ifaddr_rwlock_data);
-lck_rw_t                *in_ifaddr_rwlock = &in_ifaddr_rwlock_data;
+static LCK_GRP_DECLARE(in_ifaddr_rwlock_grp, "in_ifaddr_rwlock");
+LCK_RW_DECLARE(in_ifaddr_rwlock, &in_ifaddr_rwlock_grp);
 
 /* Protected by in_ifaddr_rwlock */
 struct in_ifaddrhead in_ifaddrhead;             /* first inet address */
 struct in_ifaddrhashhead *in_ifaddrhashtbl;     /* inet addr hash table  */
 
 #define INADDR_NHASH    61
-static u_int32_t inaddr_nhash;                  /* hash table size */
-static u_int32_t inaddr_hashp;                  /* next largest prime */
+static uint32_t inaddr_nhash;                  /* hash table size */
+static uint32_t inaddr_hashp;                  /* next largest prime */
 
 static int ip_getstat SYSCTL_HANDLER_ARGS;
 struct ipstat ipstat;
@@ -364,14 +347,6 @@ static int      ipstealth = 0;
 SYSCTL_INT(_net_inet_ip, OID_AUTO, stealth, CTLFLAG_RW | CTLFLAG_LOCKED,
     &ipstealth, 0, "");
 #endif /* IPSTEALTH */
-
-/* Firewall hooks */
-#if IPFIREWALL
-ip_fw_chk_t *ip_fw_chk_ptr;
-int fw_enable = 1;
-int fw_bypass = 1;
-int fw_one_pass = 0;
-#endif /* IPFIREWALL */
 
 #if DUMMYNET
 ip_dn_io_t *ip_dn_io_ptr;
@@ -414,22 +389,10 @@ static void save_rte(u_char *, struct in_addr);
 static int ip_dooptions(struct mbuf *, int, struct sockaddr_in *);
 static void ip_forward(struct mbuf *, int, struct sockaddr_in *);
 static void frag_freef(struct ipqhead *, struct ipq *);
-#if IPDIVERT
-#ifdef IPDIVERT_44
-static struct mbuf *ip_reass(struct mbuf *, u_int32_t *, u_int16_t *);
-#else /* !IPDIVERT_44 */
-static struct mbuf *ip_reass(struct mbuf *, u_int16_t *, u_int16_t *);
-#endif /* !IPDIVERT_44 */
-#else /* !IPDIVERT */
 static struct mbuf *ip_reass(struct mbuf *);
-#endif /* !IPDIVERT */
 static void ip_fwd_route_copyout(struct ifnet *, struct route *);
 static void ip_fwd_route_copyin(struct ifnet *, struct route *);
 static inline u_short ip_cksum(struct mbuf *, int);
-
-int ip_use_randomid = 1;
-SYSCTL_INT(_net_inet_ip, OID_AUTO, random_id, CTLFLAG_RW | CTLFLAG_LOCKED,
-    &ip_use_randomid, 0, "Randomize IP packets IDs");
 
 /*
  * On platforms which require strict alignment (currently for anything but
@@ -529,13 +492,6 @@ ip_init(struct protosw *pp, struct domain *dp)
 
 	in_ifaddr_init();
 
-	in_ifaddr_rwlock_grp_attr = lck_grp_attr_alloc_init();
-	in_ifaddr_rwlock_grp = lck_grp_alloc_init("in_ifaddr_rwlock",
-	    in_ifaddr_rwlock_grp_attr);
-	in_ifaddr_rwlock_attr = lck_attr_alloc_init();
-	lck_rw_init(in_ifaddr_rwlock, in_ifaddr_rwlock_grp,
-	    in_ifaddr_rwlock_attr);
-
 	TAILQ_INIT(&in_ifaddrhead);
 	in_ifaddrhashtbl_init();
 
@@ -543,7 +499,7 @@ ip_init(struct protosw *pp, struct domain *dp)
 
 	pr = pffindproto_locked(PF_INET, IPPROTO_RAW, SOCK_RAW);
 	if (pr == NULL) {
-		panic("%s: Unable to find [PF_INET,IPPROTO_RAW,SOCK_RAW]\n",
+		panic("%s: Unable to find [PF_INET,IPPROTO_RAW,SOCK_RAW]",
 		    __func__);
 		/* NOTREACHED */
 	}
@@ -567,12 +523,6 @@ ip_init(struct protosw *pp, struct domain *dp)
 		}
 	}
 
-	/* IP fragment reassembly queue lock */
-	ipqlock_grp_attr  = lck_grp_attr_alloc_init();
-	ipqlock_grp = lck_grp_alloc_init("ipqlock", ipqlock_grp_attr);
-	ipqlock_attr = lck_attr_alloc_init();
-	lck_mtx_init(&ipqlock, ipqlock_grp, ipqlock_attr);
-
 	lck_mtx_lock(&ipqlock);
 	/* Initialize IP reassembly queue. */
 	for (i = 0; i < IPREASS_NHASH; i++) {
@@ -585,10 +535,7 @@ ip_init(struct protosw *pp, struct domain *dp)
 	lck_mtx_unlock(&ipqlock);
 
 	getmicrotime(&tv);
-	ip_id = RandomULong() ^ tv.tv_usec;
-	ip_initid();
-
-	ipf_init();
+	ip_id = (u_short)(RandomULong() ^ tv.tv_usec);
 
 	PE_parse_boot_argn("ip_checkinterface", &i, sizeof(i));
 	switch (i) {
@@ -601,15 +548,6 @@ ip_init(struct protosw *pp, struct domain *dp)
 		break;
 	}
 
-#if IPSEC
-	sadb_stat_mutex_grp_attr = lck_grp_attr_alloc_init();
-	sadb_stat_mutex_grp = lck_grp_alloc_init("sadb_stat",
-	    sadb_stat_mutex_grp_attr);
-	sadb_stat_mutex_attr = lck_attr_alloc_init();
-	lck_mtx_init(sadb_stat_mutex, sadb_stat_mutex_grp,
-	    sadb_stat_mutex_attr);
-
-#endif
 	arp_init();
 	net_init_add(ip_init_delayed);
 }
@@ -632,12 +570,9 @@ in_ifaddrhashtbl_init(void)
 		inaddr_nhash = INADDR_NHASH;
 	}
 
-	MALLOC(in_ifaddrhashtbl, struct in_ifaddrhashhead *,
-	    inaddr_nhash * sizeof(*in_ifaddrhashtbl),
-	    M_IFADDR, M_WAITOK | M_ZERO);
-	if (in_ifaddrhashtbl == NULL) {
-		panic("in_ifaddrhashtbl_init allocation failed");
-	}
+	in_ifaddrhashtbl = zalloc_permanent(
+		inaddr_nhash * sizeof(*in_ifaddrhashtbl),
+		ZALIGN_PTR);
 
 	/*
 	 * Generate the next largest prime greater than inaddr_nhash.
@@ -658,8 +593,8 @@ in_ifaddrhashtbl_init(void)
 	inaddr_hashp = k;
 }
 
-u_int32_t
-inaddr_hashval(u_int32_t key)
+uint32_t
+inaddr_hashval(uint32_t key)
 {
 	/*
 	 * The hash index is the computed prime times the key modulo
@@ -673,10 +608,10 @@ inaddr_hashval(u_int32_t key)
 	}
 }
 
-void
-ip_proto_dispatch_in_wrapper(struct mbuf *m, int hlen, u_int8_t proto)
+struct in_ifaddrhashhead *
+inaddr_hashlookup(uint32_t key)
 {
-	ip_proto_dispatch_in(m, hlen, proto, 0);
+	return &in_ifaddrhashtbl[inaddr_hashval(key)];
 }
 
 __private_extern__ void
@@ -715,7 +650,7 @@ ip_proto_dispatch_in(struct mbuf *m, int hlen, u_int8_t proto,
 
 					changed_header = 1;
 					ip = mtod(m, struct ip *);
-					ip->ip_len = htons(ip->ip_len + hlen);
+					ip->ip_len = htons(ip->ip_len + (uint16_t)hlen);
 					ip->ip_off = htons(ip->ip_off);
 					ip->ip_sum = 0;
 					ip->ip_sum = ip_cksum_hdr_in(m, hlen);
@@ -743,7 +678,7 @@ ip_proto_dispatch_in(struct mbuf *m, int hlen, u_int8_t proto,
 	ip = mtod(m, struct ip *);
 
 	if (changed_header) {
-		ip->ip_len = ntohs(ip->ip_len) - hlen;
+		ip->ip_len = ntohs(ip->ip_len) - (u_short)hlen;
 		ip->ip_off = ntohs(ip->ip_off);
 	}
 
@@ -787,7 +722,7 @@ ip_chain_insert(struct mbuf *packet, pktchain_elm_t *tbl)
 	ip = mtod(packet, struct ip*);
 
 	/* reusing the hash function from inaddr_hashval */
-	pkttbl_idx = inaddr_hashval(ntohs(ip->ip_src.s_addr)) % PKTTBL_SZ;
+	pkttbl_idx = inaddr_hashval(ntohl(ip->ip_src.s_addr)) % PKTTBL_SZ;
 	if (tbl[pkttbl_idx].pkte_head == NULL) {
 		tbl[pkttbl_idx].pkte_head = packet;
 		tbl[pkttbl_idx].pkte_saddr.s_addr = ip->ip_src.s_addr;
@@ -820,8 +755,8 @@ ip_input_second_pass_loop_tbl(pktchain_elm_t *tbl, struct ip_fw_in_args *args)
 	for (i = 0; i < PKTTBL_SZ; i++) {
 		if (tbl[i].pkte_head != NULL) {
 			struct mbuf *m = tbl[i].pkte_head;
-			ip_input_second_pass(m, m->m_pkthdr.rcvif, 0,
-			    tbl[i].pkte_npkts, tbl[i].pkte_nbytes, args, 0);
+			ip_input_second_pass(m, m->m_pkthdr.rcvif,
+			    tbl[i].pkte_npkts, tbl[i].pkte_nbytes, args);
 
 			if (tbl[i].pkte_npkts > 2) {
 				ipstat.ips_rxc_chainsz_gt2++;
@@ -850,19 +785,13 @@ ip_input_cpout_args(struct ip_fw_in_args *args, struct ip_fw_args *args1,
 		bzero(args1, sizeof(struct ip_fw_args));
 		*done_init = TRUE;
 	}
-	args1->fwa_next_hop = args->fwai_next_hop;
-	args1->fwa_ipfw_rule = args->fwai_ipfw_rule;
 	args1->fwa_pf_rule = args->fwai_pf_rule;
-	args1->fwa_divert_rule = args->fwai_divert_rule;
 }
 
 static void
 ip_input_cpin_args(struct ip_fw_args *args1, struct ip_fw_in_args *args)
 {
-	args->fwai_next_hop = args1->fwa_next_hop;
-	args->fwai_ipfw_rule = args1->fwa_ipfw_rule;
 	args->fwai_pf_rule = args1->fwa_pf_rule;
-	args->fwai_divert_rule = args1->fwa_divert_rule;
 }
 
 typedef enum {
@@ -899,13 +828,7 @@ ip_input_dispatch_chain(struct mbuf *m)
 	while (tmp_mbuf != NULL) {
 		nxt_mbuf = mbuf_nextpkt(tmp_mbuf);
 		mbuf_setnextpkt(tmp_mbuf, NULL);
-
-		if ((sw_lro) && (ip->ip_p == IPPROTO_TCP)) {
-			tmp_mbuf = tcp_lro(tmp_mbuf, hlen);
-		}
-		if (tmp_mbuf) {
-			ip_proto_dispatch_in(tmp_mbuf, hlen, ip->ip_p, 0);
-		}
+		ip_proto_dispatch_in(tmp_mbuf, hlen, ip->ip_p, 0);
 		tmp_mbuf = nxt_mbuf;
 		if (tmp_mbuf) {
 			ip = mtod(tmp_mbuf, struct ip *);
@@ -917,7 +840,7 @@ ip_input_dispatch_chain(struct mbuf *m)
 }
 
 static void
-ip_input_setdst_chain(struct mbuf *m, uint32_t ifindex, struct in_ifaddr *ia)
+ip_input_setdst_chain(struct mbuf *m, uint16_t ifindex, struct in_ifaddr *ia)
 {
 	struct mbuf *tmp_mbuf = m;
 
@@ -1000,11 +923,9 @@ ip_input_adjust(struct mbuf *m, struct ip *ip, struct ifnet *inifp)
 /*
  * First pass does all essential packet validation and places on a per flow
  * queue for doing operations that have same outcome for all packets of a flow.
- * div_info is packet divert/tee info
  */
 static ipinput_chain_ret_t
-ip_input_first_pass(struct mbuf *m, u_int32_t *div_info,
-    struct ip_fw_in_args *args, int *ours, struct mbuf **modm)
+ip_input_first_pass(struct mbuf *m, struct ip_fw_in_args *args, struct mbuf **modm)
 {
 	struct ip       *ip;
 	struct ifnet    *inifp;
@@ -1012,30 +933,14 @@ ip_input_first_pass(struct mbuf *m, u_int32_t *div_info,
 	int             retval = IPINPUT_DOCHAIN;
 	int             len = 0;
 	struct in_addr  src_ip;
-#if IPFIREWALL
-	int             i;
-#endif
-#if IPFIREWALL || DUMMYNET
+#if DUMMYNET
 	struct m_tag            *copy;
 	struct m_tag            *p;
 	boolean_t               delete = FALSE;
 	struct ip_fw_args       args1;
 	boolean_t               init = FALSE;
-#endif
+#endif /* DUMMYNET */
 	ipfilter_t inject_filter_ref = NULL;
-
-#if !IPFIREWALL
-#pragma unused (args)
-#endif
-
-#if !IPDIVERT
-#pragma unused (div_info)
-#pragma unused (ours)
-#endif
-
-#if !IPFIREWALL_FORWARD
-#pragma unused (ours)
-#endif
 
 	/* Check if the mbuf is still valid after interface filter processing */
 	MBUF_INPUT_CHECK(m, m->m_pkthdr.rcvif);
@@ -1047,8 +952,7 @@ ip_input_first_pass(struct mbuf *m, u_int32_t *div_info,
 
 	m->m_pkthdr.pkt_flags &= ~PKTF_FORWARDED;
 
-#if IPFIREWALL || DUMMYNET
-
+#if DUMMYNET
 	/*
 	 * Don't bother searching for tag(s) if there's none.
 	 */
@@ -1060,32 +964,11 @@ ip_input_first_pass(struct mbuf *m, u_int32_t *div_info,
 	p = m_tag_first(m);
 	while (p) {
 		if (p->m_tag_id == KERNEL_MODULE_TAG_ID) {
-#if DUMMYNET
 			if (p->m_tag_type == KERNEL_TAG_TYPE_DUMMYNET) {
 				struct dn_pkt_tag *dn_tag;
 
 				dn_tag = (struct dn_pkt_tag *)(p + 1);
-				args->fwai_ipfw_rule = dn_tag->dn_ipfw_rule;
 				args->fwai_pf_rule = dn_tag->dn_pf_rule;
-				delete = TRUE;
-			}
-#endif
-
-#if IPDIVERT
-			if (p->m_tag_type == KERNEL_TAG_TYPE_DIVERT) {
-				struct divert_tag *div_tag;
-
-				div_tag = (struct divert_tag *)(p + 1);
-				args->fwai_divert_rule = div_tag->cookie;
-				delete = TRUE;
-			}
-#endif
-
-			if (p->m_tag_type == KERNEL_TAG_TYPE_IPFORWARD) {
-				struct ip_fwd_tag *ipfwd_tag;
-
-				ipfwd_tag = (struct ip_fwd_tag *)(p + 1);
-				args->fwai_next_hop = ipfwd_tag->next_hop;
 				delete = TRUE;
 			}
 
@@ -1107,24 +990,17 @@ ip_input_first_pass(struct mbuf *m, u_int32_t *div_info,
 	}
 #endif
 
-#if DUMMYNET
-	if (args->fwai_ipfw_rule || args->fwai_pf_rule) {
+	if (args->fwai_pf_rule) {
 		/* dummynet already filtered us */
 		ip = mtod(m, struct ip *);
 		hlen = IP_VHL_HL(ip->ip_vhl) << 2;
 		inject_filter_ref = ipf_get_inject_filter(m);
-#if IPFIREWALL
-		if (args->fwai_ipfw_rule) {
-			goto iphack;
-		}
-#endif /* IPFIREWALL */
 		if (args->fwai_pf_rule) {
 			goto check_with_pf;
 		}
 	}
-#endif /* DUMMYNET */
 ipfw_tags_done:
-#endif /* IPFIREWALL || DUMMYNET */
+#endif /* DUMMYNET */
 
 	/*
 	 * No need to process packet twice if we've already seen it.
@@ -1140,10 +1016,14 @@ ipfw_tags_done:
 		    struct ip *, ip, struct ifnet *, inifp,
 		    struct ip *, ip, struct ip6_hdr *, NULL);
 
-		ip->ip_len = ntohs(ip->ip_len) - hlen;
+		ip->ip_len = ntohs(ip->ip_len) - (u_short)hlen;
 		ip->ip_off = ntohs(ip->ip_off);
 		ip_proto_dispatch_in(m, hlen, ip->ip_p, inject_filter_ref);
 		return IPINPUT_DONE;
+	}
+
+	if (__improbable(m->m_pkthdr.pkt_flags & PKTF_WAKE_PKT)) {
+		if_ports_used_match_mbuf(inifp, PF_INET, m);
 	}
 
 	if (m->m_pkthdr.len < sizeof(struct ip)) {
@@ -1192,6 +1072,10 @@ ipfw_tags_done:
 		}
 		ip = mtod(m, struct ip *);
 		*modm = m;
+	}
+
+	if ((ip->ip_tos & IPTOS_ECN_MASK) == IPTOS_ECN_ECT1) {
+		m->m_pkthdr.pkt_ext_flags |= PKTF_EXT_L4S;
 	}
 
 	/* 127/8 must not appear on wire - RFC1122 */
@@ -1290,7 +1174,7 @@ ipfw_tags_done:
 
 #if DUMMYNET
 check_with_pf:
-#endif
+#endif /* DUMMYNET */
 #if PF
 	/* Invoke inbound packet filter */
 	if (PF_IS_ENABLED) {
@@ -1306,7 +1190,7 @@ check_with_pf:
 #endif /* DUMMYNET */
 		if (error != 0 || m == NULL) {
 			if (m != NULL) {
-				panic("%s: unexpected packet %p\n",
+				panic("%s: unexpected packet %p",
 				    __func__, m);
 				/* NOTREACHED */
 			}
@@ -1330,83 +1214,7 @@ check_with_pf:
 	}
 #endif
 
-#if IPFIREWALL
-#if DUMMYNET
-iphack:
-#endif /* DUMMYNET */
-	/*
-	 * Check if we want to allow this packet to be processed.
-	 * Consider it to be bad if not.
-	 */
-	if (fw_enable && IPFW_LOADED) {
-#if IPFIREWALL_FORWARD
-		/*
-		 * If we've been forwarded from the output side, then
-		 * skip the firewall a second time
-		 */
-		if (args->fwai_next_hop) {
-			*ours = 1;
-			return IPINPUT_DONTCHAIN;
-		}
-#endif  /* IPFIREWALL_FORWARD */
-		ip_input_cpout_args(args, &args1, &init);
-		args1.fwa_m = m;
-
-		i = ip_fw_chk_ptr(&args1);
-		m = args1.fwa_m;
-
-		if ((i & IP_FW_PORT_DENY_FLAG) || m == NULL) { /* drop */
-			if (m) {
-				m_freem(m);
-			}
-			ip_input_update_nstat(inifp, src_ip, 1, len);
-			KERNEL_DEBUG(DBG_LAYER_END, 0, 0, 0, 0, 0);
-			OSAddAtomic(1, &ipstat.ips_total);
-			return IPINPUT_FREED;
-		}
-		ip = mtod(m, struct ip *); /* just in case m changed */
-		*modm = m;
-		ip_input_cpin_args(&args1, args);
-
-		if (i == 0 && args->fwai_next_hop == NULL) { /* common case */
-			goto pass;
-		}
-#if DUMMYNET
-		if (DUMMYNET_LOADED && (i & IP_FW_PORT_DYNT_FLAG) != 0) {
-			/* Send packet to the appropriate pipe */
-			ip_dn_io_ptr(m, i & 0xffff, DN_TO_IP_IN, &args1,
-			    DN_CLIENT_IPFW);
-			ip_input_update_nstat(inifp, src_ip, 1, len);
-			KERNEL_DEBUG(DBG_LAYER_END, 0, 0, 0, 0, 0);
-			OSAddAtomic(1, &ipstat.ips_total);
-			return IPINPUT_FREED;
-		}
-#endif /* DUMMYNET */
-#if IPDIVERT
-		if (i != 0 && (i & IP_FW_PORT_DYNT_FLAG) == 0) {
-			/* Divert or tee packet */
-			*div_info = i;
-			*ours = 1;
-			return IPINPUT_DONTCHAIN;
-		}
-#endif
-#if IPFIREWALL_FORWARD
-		if (i == 0 && args->fwai_next_hop != NULL) {
-			retval = IPINPUT_DONTCHAIN;
-			goto pass;
-		}
-#endif
-		/*
-		 * if we get here, the packet must be dropped
-		 */
-		ip_input_update_nstat(inifp, src_ip, 1, len);
-		KERNEL_DEBUG(DBG_LAYER_END, 0, 0, 0, 0, 0);
-		m_freem(m);
-		OSAddAtomic(1, &ipstat.ips_total);
-		return IPINPUT_FREED;
-	}
-#endif /* IPFIREWALL */
-#if IPSEC | IPFIREWALL
+#if IPSEC
 pass:
 #endif
 	/*
@@ -1416,12 +1224,8 @@ pass:
 	 * to be sent and the original packet to be freed).
 	 */
 	ip_nhops = 0;           /* for source routed packets */
-#if IPFIREWALL
-	if (hlen > sizeof(struct ip) &&
-	    ip_dooptions(m, 0, args->fwai_next_hop)) {
-#else /* !IPFIREWALL */
 	if (hlen > sizeof(struct ip) && ip_dooptions(m, 0, NULL)) {
-#endif /* !IPFIREWALL */
+		src_ip = ip->ip_src;
 		ip_input_update_nstat(inifp, src_ip, 1, len);
 		KERNEL_DEBUG(DBG_LAYER_END, 0, 0, 0, 0, 0);
 		OSAddAtomic(1, &ipstat.ips_total);
@@ -1429,9 +1233,7 @@ pass:
 	}
 
 	/*
-	 * Don't chain fragmented packets as the process of determining
-	 * if it is our fragment or someone else's plus the complexity of
-	 * divert and fw args makes it harder to do chaining.
+	 * Don't chain fragmented packets
 	 */
 	if (ip->ip_off & ~(IP_DF | IP_RF)) {
 		return IPINPUT_DONTCHAIN;
@@ -1495,7 +1297,7 @@ ip_input_check_interface(struct mbuf **mp, struct ip *ip, struct ifnet *inifp)
 	/*
 	 * Check for a match in the hash bucket.
 	 */
-	lck_rw_lock_shared(in_ifaddr_rwlock);
+	lck_rw_lock_shared(&in_ifaddr_rwlock);
 	TAILQ_FOREACH(ia, INADDR_HASH(ip->ip_dst.s_addr), ia_hash) {
 		if (IA_SIN(ia)->sin_addr.s_addr == ip->ip_dst.s_addr) {
 			best_ia = ia;
@@ -1532,7 +1334,7 @@ ip_input_check_interface(struct mbuf **mp, struct ip *ip, struct ifnet *inifp)
 			ip_input_setdst_chain(m, 0, best_ia);
 		}
 	}
-	lck_rw_done(in_ifaddr_rwlock);
+	lck_rw_done(&in_ifaddr_rwlock);
 
 	if (result == IP_CHECK_IF_NONE && (inifp->if_flags & IFF_BROADCAST)) {
 		/*
@@ -1581,8 +1383,7 @@ ip_input_check_interface(struct mbuf **mp, struct ip *ip, struct ifnet *inifp)
 		}
 		ui = mtod(m, struct udpiphdr *);
 		if (ntohs(ui->ui_dport) == IPPORT_BOOTPC) {
-			ASSERT(m->m_nextpkt == NULL);
-			ip_setdstifaddr_info(m, inifp->if_index, NULL);
+			ip_input_setdst_chain(m, inifp->if_index, NULL);
 			result = IP_CHECK_IF_OURS;
 			match_ifp = inifp;
 		}
@@ -1618,7 +1419,7 @@ ip_input_check_interface(struct mbuf **mp, struct ip *ip, struct ifnet *inifp)
 
 			inet_ntop(AF_INET, &ip->ip_src, src_str, sizeof(src_str));
 			inet_ntop(AF_INET, &ip->ip_dst, dst_str, sizeof(dst_str));
-			os_log_info(OS_LOG_DEFAULT,
+			os_log(OS_LOG_DEFAULT,
 			    "%s: no interface match for packet from %s to %s proto %u received via %s",
 			    __func__, src_str, dst_str, ip->ip_p, inifp->if_xname);
 		}
@@ -1635,19 +1436,13 @@ ip_input_check_interface(struct mbuf **mp, struct ip *ip, struct ifnet *inifp)
 }
 
 static void
-ip_input_second_pass(struct mbuf *m, struct ifnet *inifp, u_int32_t div_info,
-    int npkts_in_chain, int bytes_in_chain, struct ip_fw_in_args *args, int ours)
+ip_input_second_pass(struct mbuf *m, struct ifnet *inifp,
+    int npkts_in_chain, int bytes_in_chain, struct ip_fw_in_args *args)
 {
 	struct mbuf             *tmp_mbuf = NULL;
 	unsigned int            hlen;
 
-#if !IPFIREWALL
 #pragma unused (args)
-#endif
-
-#if !IPDIVERT
-#pragma unused (div_info)
-#endif
 
 	struct ip *ip = mtod(m, struct ip *);
 	hlen = IP_VHL_HL(ip->ip_vhl) << 2;
@@ -1667,10 +1462,6 @@ ip_input_second_pass(struct mbuf *m, struct ifnet *inifp, u_int32_t div_info,
 	 */
 	ip_input_update_nstat(inifp, ip->ip_src, npkts_in_chain,
 	    bytes_in_chain);
-
-	if (ours) {
-		goto ours;
-	}
 
 	/*
 	 * Check our list of addresses, to see if the packet is for us.
@@ -1694,8 +1485,7 @@ ip_input_second_pass(struct mbuf *m, struct ifnet *inifp, u_int32_t div_info,
 	 * Enable a consistency check between the destination address
 	 * and the arrival interface for a unicast packet (the RFC 1122
 	 * strong ES model) if IP forwarding is disabled and the packet
-	 * is not locally generated and the packet is not subject to
-	 * 'ipfw fwd'.
+	 * is not locally generated
 	 *
 	 * XXX - Checking also should be disabled if the destination
 	 * address is ipnat'ed to a different interface.
@@ -1746,11 +1536,7 @@ ip_input_second_pass(struct mbuf *m, struct ifnet *inifp, u_int32_t div_info,
 			OSAddAtomic(1, &ipstat.ips_cantforward);
 			m_freem(tmp_mbuf);
 		} else {
-#if IPFIREWALL
-			ip_forward(tmp_mbuf, 0, args->fwai_next_hop);
-#else
 			ip_forward(tmp_mbuf, 0, NULL);
-#endif
 		}
 		tmp_mbuf = nxt_mbuf;
 	}
@@ -1759,41 +1545,17 @@ ip_input_second_pass(struct mbuf *m, struct ifnet *inifp, u_int32_t div_info,
 ours:
 	ip = mtod(m, struct ip *); /* in case it changed */
 	/*
-	 * If offset or IP_MF are set, must reassemble.
+	 * If offset is set, must reassemble.
 	 */
 	if (ip->ip_off & ~(IP_DF | IP_RF)) {
 		VERIFY(npkts_in_chain == 1);
-		/*
-		 * ip_reass() will return a different mbuf, and update
-		 * the divert info in div_info and args->fwai_divert_rule.
-		 */
-#if IPDIVERT
-		m = ip_reass(m, (u_int16_t *)&div_info, &args->fwai_divert_rule);
-#else
 		m = ip_reass(m);
-#endif
 		if (m == NULL) {
 			return;
 		}
 		ip = mtod(m, struct ip *);
 		/* Get the header length of the reassembled packet */
 		hlen = IP_VHL_HL(ip->ip_vhl) << 2;
-#if IPDIVERT
-		/* Restore original checksum before diverting packet */
-		if (div_info != 0) {
-			VERIFY(npkts_in_chain == 1);
-#if BYTE_ORDER != BIG_ENDIAN
-			HTONS(ip->ip_len);
-			HTONS(ip->ip_off);
-#endif
-			ip->ip_sum = 0;
-			ip->ip_sum = ip_cksum_hdr_in(m, hlen);
-#if BYTE_ORDER != BIG_ENDIAN
-			NTOHS(ip->ip_off);
-			NTOHS(ip->ip_len);
-#endif
-		}
-#endif
 	}
 
 	/*
@@ -1801,42 +1563,6 @@ ours:
 	 * IP header.
 	 */
 	ip->ip_len -= hlen;
-
-#if IPDIVERT
-	/*
-	 * Divert or tee packet to the divert protocol if required.
-	 *
-	 * If div_info is zero then cookie should be too, so we shouldn't
-	 * need to clear them here.  Assume divert_packet() does so also.
-	 */
-	if (div_info != 0) {
-		struct mbuf *clone = NULL;
-		VERIFY(npkts_in_chain == 1);
-
-		/* Clone packet if we're doing a 'tee' */
-		if (div_info & IP_FW_PORT_TEE_FLAG) {
-			clone = m_dup(m, M_DONTWAIT);
-		}
-
-		/* Restore packet header fields to original values */
-		ip->ip_len += hlen;
-
-#if BYTE_ORDER != BIG_ENDIAN
-		HTONS(ip->ip_len);
-		HTONS(ip->ip_off);
-#endif
-		/* Deliver packet to divert input routine */
-		OSAddAtomic(1, &ipstat.ips_delivered);
-		divert_packet(m, 1, div_info & 0xffff, args->fwai_divert_rule);
-
-		/* If 'tee', continue with original packet */
-		if (clone == NULL) {
-			return;
-		}
-		m = clone;
-		ip = mtod(m, struct ip *);
-	}
-#endif
 
 #if IPSEC
 	/*
@@ -1858,40 +1584,8 @@ ours:
 	 */
 	OSAddAtomic(npkts_in_chain, &ipstat.ips_delivered);
 
-#if IPFIREWALL
-	if (args->fwai_next_hop && ip->ip_p == IPPROTO_TCP) {
-		/* TCP needs IPFORWARD info if available */
-		struct m_tag *fwd_tag;
-		struct ip_fwd_tag *ipfwd_tag;
-
-		VERIFY(npkts_in_chain == 1);
-		fwd_tag = m_tag_create(KERNEL_MODULE_TAG_ID,
-		    KERNEL_TAG_TYPE_IPFORWARD, sizeof(*ipfwd_tag),
-		    M_NOWAIT, m);
-		if (fwd_tag == NULL) {
-			goto bad;
-		}
-
-		ipfwd_tag = (struct ip_fwd_tag *)(fwd_tag + 1);
-		ipfwd_tag->next_hop = args->fwai_next_hop;
-
-		m_tag_prepend(m, fwd_tag);
-
-		KERNEL_DEBUG(DBG_LAYER_END, ip->ip_dst.s_addr,
-		    ip->ip_src.s_addr, ip->ip_p, ip->ip_off, ip->ip_len);
-
-		/* TCP deals with its own locking */
-		ip_proto_dispatch_in(m, hlen, ip->ip_p, 0);
-	} else {
-		KERNEL_DEBUG(DBG_LAYER_END, ip->ip_dst.s_addr,
-		    ip->ip_src.s_addr, ip->ip_p, ip->ip_off, ip->ip_len);
-
-		ip_input_dispatch_chain(m);
-	}
-#else /* !IPFIREWALL */
 	ip_input_dispatch_chain(m);
 
-#endif /* !IPFIREWALL */
 	KERNEL_DEBUG(DBG_LAYER_END, 0, 0, 0, 0, 0);
 	return;
 bad:
@@ -1907,8 +1601,6 @@ ip_input_process_list(struct mbuf *packet_list)
 	struct mbuf     *packet = NULL;
 	struct mbuf     *modm = NULL; /* modified mbuf */
 	int             retval = 0;
-	u_int32_t       div_info = 0;
-	int             ours = 0;
 #if (DEBUG || DEVELOPMENT)
 	struct timeval start_tv;
 #endif /* (DEBUG || DEVELOPMENT) */
@@ -1948,16 +1640,16 @@ ip_input_process_list(struct mbuf *packet_list)
 restart_list_process:
 	chain = 0;
 	for (packet = packet_list; packet; packet = packet_list) {
+		m_add_crumb(packet, PKT_CRUMB_IP_INPUT);
+
 		packet_list = mbuf_nextpkt(packet);
 		mbuf_setnextpkt(packet, NULL);
 
 		num_pkts++;
 		modm = NULL;
-		div_info = 0;
 		bzero(&args, sizeof(args));
 
-		retval = ip_input_first_pass(packet, &div_info, &args,
-		    &ours, &modm);
+		retval = ip_input_first_pass(packet, &args, &modm);
 
 		if (retval == IPINPUT_DOCHAIN) {
 			if (modm) {
@@ -2001,8 +1693,8 @@ restart_list_process:
 			net_perf_histogram(&net_perf, 1);
 		}
 #endif /* (DEBUG || DEVELOPMENT) */
-		ip_input_second_pass(packet, packet->m_pkthdr.rcvif, div_info,
-		    1, packet->m_pkthdr.len, &args, ours);
+		ip_input_second_pass(packet, packet->m_pkthdr.rcvif,
+		    1, packet->m_pkthdr.len, &args);
 	}
 
 	if (packet_list) {
@@ -2037,6 +1729,8 @@ ip_input(struct mbuf *m)
 	inifp = m->m_pkthdr.rcvif;
 	VERIFY(inifp != NULL);
 
+	m_add_crumb(m, PKT_CRUMB_IP_INPUT);
+
 	ipstat.ips_rxc_notlist++;
 
 	/* Perform IP header alignment fixup, if needed */
@@ -2044,7 +1738,7 @@ ip_input(struct mbuf *m)
 
 	m->m_pkthdr.pkt_flags &= ~PKTF_FORWARDED;
 
-#if IPFIREWALL || DUMMYNET
+#if DUMMYNET
 	bzero(&args, sizeof(struct ip_fw_args));
 
 	/*
@@ -2055,37 +1749,12 @@ ip_input(struct mbuf *m)
 	}
 
 	/* Grab info from mtags prepended to the chain */
-#if DUMMYNET
 	if ((tag = m_tag_locate(m, KERNEL_MODULE_TAG_ID,
 	    KERNEL_TAG_TYPE_DUMMYNET, NULL)) != NULL) {
 		struct dn_pkt_tag *dn_tag;
 
 		dn_tag = (struct dn_pkt_tag *)(tag + 1);
-		args.fwa_ipfw_rule = dn_tag->dn_ipfw_rule;
 		args.fwa_pf_rule = dn_tag->dn_pf_rule;
-
-		m_tag_delete(m, tag);
-	}
-#endif /* DUMMYNET */
-
-#if IPDIVERT
-	if ((tag = m_tag_locate(m, KERNEL_MODULE_TAG_ID,
-	    KERNEL_TAG_TYPE_DIVERT, NULL)) != NULL) {
-		struct divert_tag *div_tag;
-
-		div_tag = (struct divert_tag *)(tag + 1);
-		args.fwa_divert_rule = div_tag->cookie;
-
-		m_tag_delete(m, tag);
-	}
-#endif
-
-	if ((tag = m_tag_locate(m, KERNEL_MODULE_TAG_ID,
-	    KERNEL_TAG_TYPE_IPFORWARD, NULL)) != NULL) {
-		struct ip_fwd_tag *ipfwd_tag;
-
-		ipfwd_tag = (struct ip_fwd_tag *)(tag + 1);
-		args.fwa_next_hop = ipfwd_tag->next_hop;
 
 		m_tag_delete(m, tag);
 	}
@@ -2096,24 +1765,17 @@ ip_input(struct mbuf *m)
 	}
 #endif
 
-#if DUMMYNET
-	if (args.fwa_ipfw_rule || args.fwa_pf_rule) {
+	if (args.fwa_pf_rule) {
 		/* dummynet already filtered us */
 		ip = mtod(m, struct ip *);
 		hlen = IP_VHL_HL(ip->ip_vhl) << 2;
 		inject_filter_ref = ipf_get_inject_filter(m);
-#if IPFIREWALL
-		if (args.fwa_ipfw_rule) {
-			goto iphack;
-		}
-#endif /* IPFIREWALL */
 		if (args.fwa_pf_rule) {
 			goto check_with_pf;
 		}
 	}
-#endif /* DUMMYNET */
 ipfw_tags_done:
-#endif /* IPFIREWALL || DUMMYNET */
+#endif /* DUMMYNET */
 
 	/*
 	 * No need to process packet twice if we've already seen it.
@@ -2129,10 +1791,14 @@ ipfw_tags_done:
 		    struct ip *, ip, struct ifnet *, inifp,
 		    struct ip *, ip, struct ip6_hdr *, NULL);
 
-		ip->ip_len = ntohs(ip->ip_len) - hlen;
+		ip->ip_len = ntohs(ip->ip_len) - (u_short)hlen;
 		ip->ip_off = ntohs(ip->ip_off);
 		ip_proto_dispatch_in(m, hlen, ip->ip_p, inject_filter_ref);
 		return;
+	}
+
+	if (__improbable(m->m_pkthdr.pkt_flags & PKTF_WAKE_PKT)) {
+		if_ports_used_match_mbuf(inifp, PF_INET, m);
 	}
 
 	OSAddAtomic(1, &ipstat.ips_total);
@@ -2277,7 +1943,7 @@ check_with_pf:
 #endif /* DUMMYNET */
 		if (error != 0 || m == NULL) {
 			if (m != NULL) {
-				panic("%s: unexpected packet %p\n",
+				panic("%s: unexpected packet %p",
 				    __func__, m);
 				/* NOTREACHED */
 			}
@@ -2295,71 +1961,7 @@ check_with_pf:
 	}
 #endif
 
-#if IPFIREWALL
-#if DUMMYNET
-iphack:
-#endif /* DUMMYNET */
-	/*
-	 * Check if we want to allow this packet to be processed.
-	 * Consider it to be bad if not.
-	 */
-	if (fw_enable && IPFW_LOADED) {
-#if IPFIREWALL_FORWARD
-		/*
-		 * If we've been forwarded from the output side, then
-		 * skip the firewall a second time
-		 */
-		if (args.fwa_next_hop) {
-			goto ours;
-		}
-#endif  /* IPFIREWALL_FORWARD */
-
-		args.fwa_m = m;
-
-		i = ip_fw_chk_ptr(&args);
-		m = args.fwa_m;
-
-		if ((i & IP_FW_PORT_DENY_FLAG) || m == NULL) { /* drop */
-			if (m) {
-				m_freem(m);
-			}
-			return;
-		}
-		ip = mtod(m, struct ip *); /* just in case m changed */
-
-		if (i == 0 && args.fwa_next_hop == NULL) { /* common case */
-			goto pass;
-		}
-#if DUMMYNET
-		if (DUMMYNET_LOADED && (i & IP_FW_PORT_DYNT_FLAG) != 0) {
-			/* Send packet to the appropriate pipe */
-			ip_dn_io_ptr(m, i & 0xffff, DN_TO_IP_IN, &args,
-			    DN_CLIENT_IPFW);
-			return;
-		}
-#endif /* DUMMYNET */
-#if IPDIVERT
-		if (i != 0 && (i & IP_FW_PORT_DYNT_FLAG) == 0) {
-			/* Divert or tee packet */
-			div_info = i;
-			goto ours;
-		}
-#endif
-#if IPFIREWALL_FORWARD
-		if (i == 0 && args.fwa_next_hop != NULL) {
-			goto pass;
-		}
-#endif
-		/*
-		 * if we get here, the packet must be dropped
-		 */
-		m_freem(m);
-		return;
-	}
-#endif /* IPFIREWALL */
-#if IPSEC | IPFIREWALL
 pass:
-#endif
 	/*
 	 * Process options and, if not destined for us,
 	 * ship it on.  ip_dooptions returns 1 when an
@@ -2367,12 +1969,7 @@ pass:
 	 * to be sent and the original packet to be freed).
 	 */
 	ip_nhops = 0;           /* for source routed packets */
-#if IPFIREWALL
-	if (hlen > sizeof(struct ip) &&
-	    ip_dooptions(m, 0, args.fwa_next_hop)) {
-#else /* !IPFIREWALL */
 	if (hlen > sizeof(struct ip) && ip_dooptions(m, 0, NULL)) {
-#endif /* !IPFIREWALL */
 		return;
 	}
 
@@ -2437,11 +2034,7 @@ pass:
 		OSAddAtomic(1, &ipstat.ips_cantforward);
 		m_freem(m);
 	} else {
-#if IPFIREWALL
-		ip_forward(m, 0, args.fwa_next_hop);
-#else
 		ip_forward(m, 0, NULL);
-#endif
 	}
 	return;
 
@@ -2450,36 +2043,13 @@ ours:
 	 * If offset or IP_MF are set, must reassemble.
 	 */
 	if (ip->ip_off & ~(IP_DF | IP_RF)) {
-		/*
-		 * ip_reass() will return a different mbuf, and update
-		 * the divert info in div_info and args.fwa_divert_rule.
-		 */
-#if IPDIVERT
-		m = ip_reass(m, (u_int16_t *)&div_info, &args.fwa_divert_rule);
-#else
 		m = ip_reass(m);
-#endif
 		if (m == NULL) {
 			return;
 		}
 		ip = mtod(m, struct ip *);
 		/* Get the header length of the reassembled packet */
 		hlen = IP_VHL_HL(ip->ip_vhl) << 2;
-#if IPDIVERT
-		/* Restore original checksum before diverting packet */
-		if (div_info != 0) {
-#if BYTE_ORDER != BIG_ENDIAN
-			HTONS(ip->ip_len);
-			HTONS(ip->ip_off);
-#endif
-			ip->ip_sum = 0;
-			ip->ip_sum = ip_cksum_hdr_in(m, hlen);
-#if BYTE_ORDER != BIG_ENDIAN
-			NTOHS(ip->ip_off);
-			NTOHS(ip->ip_len);
-#endif
-		}
-#endif
 	}
 
 	/*
@@ -2488,40 +2058,6 @@ ours:
 	 */
 	ip->ip_len -= hlen;
 
-#if IPDIVERT
-	/*
-	 * Divert or tee packet to the divert protocol if required.
-	 *
-	 * If div_info is zero then cookie should be too, so we shouldn't
-	 * need to clear them here.  Assume divert_packet() does so also.
-	 */
-	if (div_info != 0) {
-		struct mbuf *clone = NULL;
-
-		/* Clone packet if we're doing a 'tee' */
-		if (div_info & IP_FW_PORT_TEE_FLAG) {
-			clone = m_dup(m, M_DONTWAIT);
-		}
-
-		/* Restore packet header fields to original values */
-		ip->ip_len += hlen;
-
-#if BYTE_ORDER != BIG_ENDIAN
-		HTONS(ip->ip_len);
-		HTONS(ip->ip_off);
-#endif
-		/* Deliver packet to divert input routine */
-		OSAddAtomic(1, &ipstat.ips_delivered);
-		divert_packet(m, 1, div_info & 0xffff, args.fwa_divert_rule);
-
-		/* If 'tee', continue with original packet */
-		if (clone == NULL) {
-			return;
-		}
-		m = clone;
-		ip = mtod(m, struct ip *);
-	}
-#endif
 
 #if IPSEC
 	/*
@@ -2542,51 +2078,7 @@ ours:
 	 */
 	OSAddAtomic(1, &ipstat.ips_delivered);
 
-#if IPFIREWALL
-	if (args.fwa_next_hop && ip->ip_p == IPPROTO_TCP) {
-		/* TCP needs IPFORWARD info if available */
-		struct m_tag *fwd_tag;
-		struct ip_fwd_tag *ipfwd_tag;
-
-		fwd_tag = m_tag_create(KERNEL_MODULE_TAG_ID,
-		    KERNEL_TAG_TYPE_IPFORWARD, sizeof(*ipfwd_tag),
-		    M_NOWAIT, m);
-		if (fwd_tag == NULL) {
-			goto bad;
-		}
-
-		ipfwd_tag = (struct ip_fwd_tag *)(fwd_tag + 1);
-		ipfwd_tag->next_hop = args.fwa_next_hop;
-
-		m_tag_prepend(m, fwd_tag);
-
-		KERNEL_DEBUG(DBG_LAYER_END, ip->ip_dst.s_addr,
-		    ip->ip_src.s_addr, ip->ip_p, ip->ip_off, ip->ip_len);
-
-		/* TCP deals with its own locking */
-		ip_proto_dispatch_in(m, hlen, ip->ip_p, 0);
-	} else {
-		KERNEL_DEBUG(DBG_LAYER_END, ip->ip_dst.s_addr,
-		    ip->ip_src.s_addr, ip->ip_p, ip->ip_off, ip->ip_len);
-
-		if ((sw_lro) && (ip->ip_p == IPPROTO_TCP)) {
-			m = tcp_lro(m, hlen);
-			if (m == NULL) {
-				return;
-			}
-		}
-
-		ip_proto_dispatch_in(m, hlen, ip->ip_p, 0);
-	}
-#else /* !IPFIREWALL */
-	if ((sw_lro) && (ip->ip_p == IPPROTO_TCP)) {
-		m = tcp_lro(m, hlen);
-		if (m == NULL) {
-			return;
-		}
-	}
 	ip_proto_dispatch_in(m, hlen, ip->ip_p, 0);
-#endif /* !IPFIREWALL */
 	return;
 
 bad:
@@ -2672,23 +2164,10 @@ done:
  * whole datagram.  If a chain for reassembly of this datagram already
  * exists, then it is given as fp; otherwise have to make a chain.
  *
- * When IPDIVERT enabled, keep additional state with each packet that
- * tells us if we need to divert or tee the packet we're building.
- *
  * The IP header is *NOT* adjusted out of iplen (but in host byte order).
  */
 static struct mbuf *
-#if IPDIVERT
-ip_reass(struct mbuf *m,
-#ifdef IPDIVERT_44
-    u_int32_t *divinfo,
-#else /* IPDIVERT_44 */
-    u_int16_t *divinfo,
-#endif /* IPDIVERT_44 */
-    u_int16_t *divcookie)
-#else /* IPDIVERT */
 ip_reass(struct mbuf *m)
-#endif /* IPDIVERT */
 {
 	struct ip *ip;
 	struct mbuf *p, *q, *nq, *t;
@@ -2731,9 +2210,6 @@ ip_reass(struct mbuf *m)
 		if (ip->ip_id == fp->ipq_id &&
 		    ip->ip_src.s_addr == fp->ipq_src.s_addr &&
 		    ip->ip_dst.s_addr == fp->ipq_dst.s_addr &&
-#if CONFIG_MACF_NET
-		    mac_ipq_label_compare(m, fp) &&
-#endif
 		    ip->ip_p == fp->ipq_p) {
 			goto found;
 		}
@@ -2878,14 +2354,6 @@ found:
 		if (fp == NULL) {
 			goto dropfrag;
 		}
-#if CONFIG_MACF_NET
-		if (mac_ipq_label_init(fp, M_NOWAIT) != 0) {
-			ipq_free(fp);
-			fp = NULL;
-			goto dropfrag;
-		}
-		mac_ipq_label_associate(m, fp);
-#endif
 		TAILQ_INSERT_HEAD(head, fp, ipq_list);
 		nipq++;
 		fp->ipq_nfrags = 1;
@@ -2904,29 +2372,10 @@ found:
 			fp->ipq_csum = csum;
 			fp->ipq_csum_flags = csum_flags;
 		}
-#if IPDIVERT
-		/*
-		 * Transfer firewall instructions to the fragment structure.
-		 * Only trust info in the fragment at offset 0.
-		 */
-		if (ip->ip_off == 0) {
-#ifdef IPDIVERT_44
-			fp->ipq_div_info = *divinfo;
-#else
-			fp->ipq_divert = *divinfo;
-#endif
-			fp->ipq_div_cookie = *divcookie;
-		}
-		*divinfo = 0;
-		*divcookie = 0;
-#endif /* IPDIVERT */
 		m = NULL;       /* nothing to return */
 		goto done;
 	} else {
 		fp->ipq_nfrags++;
-#if CONFIG_MACF_NET
-		mac_ipq_label_update(m, fp);
-#endif
 	}
 
 #define GETIP(m)        ((struct ip *)((m)->m_pkthdr.pkt_hdr))
@@ -3019,22 +2468,6 @@ found:
 		fp->ipq_csum_flags = 0;
 	}
 
-#if IPDIVERT
-	/*
-	 * Transfer firewall instructions to the fragment structure.
-	 * Only trust info in the fragment at offset 0.
-	 */
-	if (ip->ip_off == 0) {
-#ifdef IPDIVERT_44
-		fp->ipq_div_info = *divinfo;
-#else
-		fp->ipq_divert = *divinfo;
-#endif
-		fp->ipq_div_cookie = *divcookie;
-	}
-	*divinfo = 0;
-	*divcookie = 0;
-#endif /* IPDIVERT */
 
 	/*
 	 * Check for complete reassembly and perform frag per packet
@@ -3106,7 +2539,7 @@ found:
 
 		ADDCARRY(csum);
 
-		m->m_pkthdr.csum_rx_val = csum;
+		m->m_pkthdr.csum_rx_val = (uint16_t)csum;
 		m->m_pkthdr.csum_rx_start = sizeof(struct ip);
 		m->m_pkthdr.csum_flags = fp->ipq_csum_flags;
 	} else if ((m->m_pkthdr.rcvif->if_flags & IFF_LOOPBACK) ||
@@ -3118,28 +2551,12 @@ found:
 		    CSUM_IP_CHECKED | CSUM_IP_VALID;
 	}
 
-#if IPDIVERT
-	/*
-	 * Extract firewall instructions from the fragment structure.
-	 */
-#ifdef IPDIVERT_44
-	*divinfo = fp->ipq_div_info;
-#else
-	*divinfo = fp->ipq_divert;
-#endif
-	*divcookie = fp->ipq_div_cookie;
-#endif /* IPDIVERT */
-
-#if CONFIG_MACF_NET
-	mac_mbuf_label_associate_ipq(fp, m);
-	mac_ipq_label_destroy(fp);
-#endif
 	/*
 	 * Create header for new ip packet by modifying header of first
 	 * packet; dequeue and discard fragment reassembly header.
 	 * Make header visible.
 	 */
-	ip->ip_len = (IP_VHL_HL(ip->ip_vhl) << 2) + next;
+	ip->ip_len = (u_short)((IP_VHL_HL(ip->ip_vhl) << 2) + next);
 	ip->ip_src = fp->ipq_src;
 	ip->ip_dst = fp->ipq_dst;
 
@@ -3178,10 +2595,6 @@ done:
 	return NULL;
 
 dropfrag:
-#if IPDIVERT
-	*divinfo = 0;
-	*divcookie = 0;
-#endif /* IPDIVERT */
 	ipstat.ips_fragdropped++;
 	if (fp != NULL) {
 		fp->ipq_nfrags--;
@@ -3363,7 +2776,8 @@ ip_dooptions(struct mbuf *m, int pass, struct sockaddr_in *next_hop)
 	u_char *cp;
 	struct ip_timestamp *ipt;
 	struct in_ifaddr *ia;
-	int opt, optlen, cnt, off, code, type = ICMP_PARAMPROB, forward = 0;
+	int opt, optlen, cnt, off, type = ICMP_PARAMPROB, forward = 0;
+	uint8_t code = 0;
 	struct in_addr *sin, dst;
 	u_int32_t ntime;
 	struct sockaddr_in ipaddr = {
@@ -3389,13 +2803,13 @@ ip_dooptions(struct mbuf *m, int pass, struct sockaddr_in *next_hop)
 			optlen = 1;
 		} else {
 			if (cnt < IPOPT_OLEN + sizeof(*cp)) {
-				code = &cp[IPOPT_OLEN] - (u_char *)ip;
+				code = (uint8_t)(&cp[IPOPT_OLEN] - (u_char *)ip);
 				goto bad;
 			}
 			optlen = cp[IPOPT_OLEN];
 			if (optlen < IPOPT_OLEN + sizeof(*cp) ||
 			    optlen > cnt) {
-				code = &cp[IPOPT_OLEN] - (u_char *)ip;
+				code = (uint8_t)(&cp[IPOPT_OLEN] - (u_char *)ip);
 				goto bad;
 			}
 		}
@@ -3415,11 +2829,11 @@ ip_dooptions(struct mbuf *m, int pass, struct sockaddr_in *next_hop)
 		case IPOPT_LSRR:
 		case IPOPT_SSRR:
 			if (optlen < IPOPT_OFFSET + sizeof(*cp)) {
-				code = &cp[IPOPT_OLEN] - (u_char *)ip;
+				code = (uint8_t)(&cp[IPOPT_OLEN] - (u_char *)ip);
 				goto bad;
 			}
 			if ((off = cp[IPOPT_OFFSET]) < IPOPT_MINOFF) {
-				code = &cp[IPOPT_OFFSET] - (u_char *)ip;
+				code = (uint8_t)(&cp[IPOPT_OFFSET] - (u_char *)ip);
 				goto bad;
 			}
 			ipaddr.sin_addr = ip->ip_dst;
@@ -3519,11 +2933,11 @@ nosourcerouting:
 
 		case IPOPT_RR:
 			if (optlen < IPOPT_OFFSET + sizeof(*cp)) {
-				code = &cp[IPOPT_OFFSET] - (u_char *)ip;
+				code = (uint8_t)(&cp[IPOPT_OFFSET] - (u_char *)ip);
 				goto bad;
 			}
 			if ((off = cp[IPOPT_OFFSET]) < IPOPT_MINOFF) {
-				code = &cp[IPOPT_OFFSET] - (u_char *)ip;
+				code = (uint8_t)(&cp[IPOPT_OFFSET] - (u_char *)ip);
 				goto bad;
 			}
 			/*
@@ -3556,21 +2970,23 @@ nosourcerouting:
 			break;
 
 		case IPOPT_TS:
-			code = cp - (u_char *)ip;
+			code = (uint8_t)(cp - (u_char *)ip);
 			ipt = (struct ip_timestamp *)(void *)cp;
 			if (ipt->ipt_len < 4 || ipt->ipt_len > 40) {
-				code = (u_char *)&ipt->ipt_len - (u_char *)ip;
+				code = (uint8_t)((u_char *)&ipt->ipt_len -
+				    (u_char *)ip);
 				goto bad;
 			}
 			if (ipt->ipt_ptr < 5) {
-				code = (u_char *)&ipt->ipt_ptr - (u_char *)ip;
+				code = (uint8_t)((u_char *)&ipt->ipt_ptr -
+				    (u_char *)ip);
 				goto bad;
 			}
 			if (ipt->ipt_ptr >
 			    ipt->ipt_len - (int)sizeof(int32_t)) {
 				if (++ipt->ipt_oflw == 0) {
-					code = (u_char *)&ipt->ipt_ptr -
-					    (u_char *)ip;
+					code = (uint8_t)((u_char *)&ipt->ipt_ptr -
+					    (u_char *)ip);
 					goto bad;
 				}
 				break;
@@ -3583,8 +2999,8 @@ nosourcerouting:
 			case IPOPT_TS_TSANDADDR:
 				if (ipt->ipt_ptr - 1 + sizeof(n_time) +
 				    sizeof(struct in_addr) > ipt->ipt_len) {
-					code = (u_char *)&ipt->ipt_ptr -
-					    (u_char *)ip;
+					code = (uint8_t)((u_char *)&ipt->ipt_ptr -
+					    (u_char *)ip);
 					goto bad;
 				}
 				ipaddr.sin_addr = dst;
@@ -3605,8 +3021,8 @@ nosourcerouting:
 			case IPOPT_TS_PRESPEC:
 				if (ipt->ipt_ptr - 1 + sizeof(n_time) +
 				    sizeof(struct in_addr) > ipt->ipt_len) {
-					code = (u_char *)&ipt->ipt_ptr -
-					    (u_char *)ip;
+					code = (uint8_t)((u_char *)&ipt->ipt_ptr -
+					    (u_char *)ip);
 					goto bad;
 				}
 				(void) memcpy(&ipaddr.sin_addr, sin,
@@ -3622,8 +3038,8 @@ nosourcerouting:
 
 			default:
 				/* XXX can't take &ipt->ipt_flg */
-				code = (u_char *)&ipt->ipt_ptr -
-				    (u_char *)ip + 1;
+				code = (uint8_t)((u_char *)&ipt->ipt_ptr -
+				    (u_char *)ip + 1);
 				goto bad;
 			}
 			ntime = iptime();
@@ -4004,9 +3420,7 @@ ip_fwd_route_copyin(struct ifnet *ifp, struct route *src)
 static void
 ip_forward(struct mbuf *m, int srcrt, struct sockaddr_in *next_hop)
 {
-#if !IPFIREWALL
 #pragma unused(next_hop)
-#endif
 	struct ip *ip = mtod(m, struct ip *);
 	struct sockaddr_in *sin;
 	struct rtentry *rt;
@@ -4033,15 +3447,7 @@ ip_forward(struct mbuf *m, int srcrt, struct sockaddr_in *next_hop)
 #endif /* PF */
 
 	dest = 0;
-#if IPFIREWALL
-	/*
-	 * Cache the destination address of the packet; this may be
-	 * changed by use of 'ipfw fwd'.
-	 */
-	pkt_dst = ((next_hop != NULL) ? next_hop->sin_addr : ip->ip_dst);
-#else /* !IPFIREWALL */
 	pkt_dst = ip->ip_dst;
-#endif /* !IPFIREWALL */
 
 #if DIAGNOSTIC
 	if (ipprintfs) {
@@ -4104,8 +3510,7 @@ ip_forward(struct mbuf *m, int srcrt, struct sockaddr_in *next_hop)
 	 * data in a cluster may change before we reach icmp_error().
 	 */
 	MGET(mcopy, M_DONTWAIT, m->m_type);
-	if (mcopy != NULL) {
-		M_COPY_PKTHDR(mcopy, m);
+	if (mcopy != NULL && m_dup_pkthdr(mcopy, m, M_DONTWAIT) == 0) {
 		mcopy->m_len = imin((IP_VHL_HL(ip->ip_vhl) << 2) + 8,
 		    (int)ip->ip_len);
 		m_copydata(m, 0, mcopy->m_len, mtod(mcopy, caddr_t));
@@ -4161,27 +3566,6 @@ ip_forward(struct mbuf *m, int srcrt, struct sockaddr_in *next_hop)
 	}
 	RT_UNLOCK(rt);
 
-#if IPFIREWALL
-	if (next_hop != NULL) {
-		/* Pass IPFORWARD info if available */
-		struct m_tag *tag;
-		struct ip_fwd_tag *ipfwd_tag;
-
-		tag = m_tag_create(KERNEL_MODULE_TAG_ID,
-		    KERNEL_TAG_TYPE_IPFORWARD,
-		    sizeof(*ipfwd_tag), M_NOWAIT, m);
-		if (tag == NULL) {
-			error = ENOBUFS;
-			m_freem(m);
-			goto done;
-		}
-
-		ipfwd_tag = (struct ip_fwd_tag *)(tag + 1);
-		ipfwd_tag->next_hop = next_hop;
-
-		m_tag_prepend(m, tag);
-	}
-#endif /* IPFIREWALL */
 
 	/* Mark this packet as being forwarded from another interface */
 	m->m_pkthdr.pkt_flags |= PKTF_FORWARDED;
@@ -4281,7 +3665,7 @@ ip_forward(struct mbuf *m, int srcrt, struct sockaddr_in *next_hop)
 			struct secasvar *sav;
 			struct route *ro;
 			struct ip *ipm;
-			int ipsechdr;
+			size_t ipsechdr;
 
 			/* count IPsec header size */
 			ipsechdr = ipsec_hdrsiz(sp);
@@ -4347,7 +3731,7 @@ ip_forward(struct mbuf *m, int srcrt, struct sockaddr_in *next_hop)
 		}
 		break;
 
-	case EACCES:                    /* ipfw denied packet */
+	case EACCES:
 		m_freem(mcopy);
 		goto done;
 	}
@@ -4396,7 +3780,27 @@ ip_savecontrol(struct inpcb *inp, struct mbuf **mp, struct ip *ip,
 			goto no_mbufs;
 		}
 	}
-	if (inp->inp_flags & INP_RECVDSTADDR) {
+	if (inp->inp_socket->so_flags & SOF_RECV_TRAFFIC_CLASS) {
+		int tc = m_get_traffic_class(m);
+
+		mp = sbcreatecontrol_mbuf((caddr_t)&tc, sizeof(tc),
+		    SO_TRAFFIC_CLASS, SOL_SOCKET, mp);
+		if (*mp == NULL) {
+			goto no_mbufs;
+		}
+	}
+	if ((inp->inp_socket->so_flags & SOF_RECV_WAKE_PKT) &&
+	    (m->m_pkthdr.pkt_flags & PKTF_WAKE_PKT)) {
+		int flag = 1;
+
+		mp = sbcreatecontrol_mbuf((caddr_t)&flag, sizeof(flag),
+		    SO_RECV_WAKE_PKT, SOL_SOCKET, mp);
+		if (*mp == NULL) {
+			goto no_mbufs;
+		}
+	}
+
+	if (inp->inp_flags & INP_RECVDSTADDR || SOFLOW_ENABLED(inp->inp_socket)) {
 		mp = sbcreatecontrol_mbuf((caddr_t)&ip->ip_dst,
 		    sizeof(struct in_addr), IP_RECVDSTADDR, IPPROTO_IP, mp);
 		if (*mp == NULL) {
@@ -4481,15 +3885,6 @@ makedummy:
 			goto no_mbufs;
 		}
 	}
-	if (inp->inp_socket->so_flags & SOF_RECV_TRAFFIC_CLASS) {
-		int tc = m_get_traffic_class(m);
-
-		mp = sbcreatecontrol_mbuf((caddr_t)&tc, sizeof(tc),
-		    SO_TRAFFIC_CLASS, SOL_SOCKET, mp);
-		if (*mp == NULL) {
-			goto no_mbufs;
-		}
-	}
 	if (inp->inp_flags & INP_PKTINFO) {
 		struct in_pktinfo pi;
 
@@ -4558,7 +3953,7 @@ ip_getstat SYSCTL_HANDLER_ARGS
 }
 
 void
-ip_setsrcifaddr_info(struct mbuf *m, uint32_t src_idx, struct in_ifaddr *ia)
+ip_setsrcifaddr_info(struct mbuf *m, uint16_t src_idx, struct in_ifaddr *ia)
 {
 	VERIFY(m->m_flags & M_PKTHDR);
 
@@ -4579,7 +3974,7 @@ ip_setsrcifaddr_info(struct mbuf *m, uint32_t src_idx, struct in_ifaddr *ia)
 }
 
 void
-ip_setdstifaddr_info(struct mbuf *m, uint32_t dst_idx, struct in_ifaddr *ia)
+ip_setdstifaddr_info(struct mbuf *m, uint16_t dst_idx, struct in_ifaddr *ia)
 {
 	VERIFY(m->m_flags & M_PKTHDR);
 

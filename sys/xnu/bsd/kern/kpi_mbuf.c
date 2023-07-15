@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2004-2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2004-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -34,7 +34,6 @@
 #include <sys/socket.h>
 #include <kern/debug.h>
 #include <libkern/OSAtomic.h>
-#include <kern/kalloc.h>
 #include <string.h>
 #include <net/dlil.h>
 #include <netinet/in.h>
@@ -53,13 +52,14 @@ static const mbuf_flags_t mbuf_cflags_mask = (MBUF_EXT);
 #define MAX_MBUF_TX_COMPL_FUNC 32
 mbuf_tx_compl_func
     mbuf_tx_compl_table[MAX_MBUF_TX_COMPL_FUNC];
-extern lck_rw_t *mbuf_tx_compl_tbl_lock;
+extern lck_rw_t mbuf_tx_compl_tbl_lock;
 u_int32_t mbuf_tx_compl_index = 0;
 
 #if (DEVELOPMENT || DEBUG)
 int mbuf_tx_compl_debug = 0;
-SInt64 mbuf_tx_compl_outstanding __attribute__((aligned(8))) = 0;
-u_int64_t mbuf_tx_compl_aborted __attribute__((aligned(8))) = 0;
+uint64_t mbuf_tx_compl_requested __attribute__((aligned(8))) = 0;
+uint64_t mbuf_tx_compl_callbacks __attribute__((aligned(8))) = 0;
+uint64_t mbuf_tx_compl_aborted __attribute__((aligned(8))) = 0;
 
 SYSCTL_DECL(_kern_ipc);
 SYSCTL_NODE(_kern_ipc, OID_AUTO, mbtxcf,
@@ -68,8 +68,10 @@ SYSCTL_INT(_kern_ipc_mbtxcf, OID_AUTO, debug,
     CTLFLAG_RW | CTLFLAG_LOCKED, &mbuf_tx_compl_debug, 0, "");
 SYSCTL_INT(_kern_ipc_mbtxcf, OID_AUTO, index,
     CTLFLAG_RD | CTLFLAG_LOCKED, &mbuf_tx_compl_index, 0, "");
-SYSCTL_QUAD(_kern_ipc_mbtxcf, OID_AUTO, oustanding,
-    CTLFLAG_RD | CTLFLAG_LOCKED, &mbuf_tx_compl_outstanding, "");
+SYSCTL_QUAD(_kern_ipc_mbtxcf, OID_AUTO, requested,
+    CTLFLAG_RD | CTLFLAG_LOCKED, &mbuf_tx_compl_requested, "");
+SYSCTL_QUAD(_kern_ipc_mbtxcf, OID_AUTO, callbacks,
+    CTLFLAG_RD | CTLFLAG_LOCKED, &mbuf_tx_compl_callbacks, "");
 SYSCTL_QUAD(_kern_ipc_mbtxcf, OID_AUTO, aborted,
     CTLFLAG_RD | CTLFLAG_LOCKED, &mbuf_tx_compl_aborted, "");
 #endif /* (DEBUG || DEVELOPMENT) */
@@ -102,7 +104,7 @@ mbuf_setdata(mbuf_t mbuf, void *data, size_t len)
 		return EINVAL;
 	}
 	mbuf->m_data = data;
-	mbuf->m_len = len;
+	mbuf->m_len = (int32_t)len;
 
 	return 0;
 }
@@ -430,7 +432,7 @@ mbuf_copym(const mbuf_t src, size_t offset, size_t len,
     mbuf_how_t how, mbuf_t *new_mbuf)
 {
 	/* Must set *mbuf to NULL in failure case */
-	*new_mbuf = m_copym(src, offset, len, how);
+	*new_mbuf = m_copym(src, (int)offset, (int)len, how);
 
 	return *new_mbuf == NULL ? ENOMEM : 0;
 }
@@ -448,7 +450,7 @@ errno_t
 mbuf_prepend(mbuf_t *orig, size_t len, mbuf_how_t how)
 {
 	/* Must set *orig to NULL in failure case */
-	*orig = m_prepend_2(*orig, len, how, 0);
+	*orig = m_prepend_2(*orig, (int)len, how, 0);
 
 	return *orig == NULL ? ENOMEM : 0;
 }
@@ -458,7 +460,7 @@ mbuf_split(mbuf_t src, size_t offset,
     mbuf_how_t how, mbuf_t *new_mbuf)
 {
 	/* Must set *new_mbuf to NULL in failure case */
-	*new_mbuf = m_split(src, offset, how);
+	*new_mbuf = m_split(src, (int)offset, how);
 
 	return *new_mbuf == NULL ? ENOMEM : 0;
 }
@@ -467,7 +469,7 @@ errno_t
 mbuf_pullup(mbuf_t *mbuf, size_t len)
 {
 	/* Must set *mbuf to NULL in failure case */
-	*mbuf = m_pullup(*mbuf, len);
+	*mbuf = m_pullup(*mbuf, (int)len);
 
 	return *mbuf == NULL ? ENOMEM : 0;
 }
@@ -477,7 +479,7 @@ mbuf_pulldown(mbuf_t src, size_t *offset, size_t len, mbuf_t *location)
 {
 	/* Must set *location to NULL in failure case */
 	int new_offset;
-	*location = m_pulldown(src, *offset, len, &new_offset);
+	*location = m_pulldown(src, (int)*offset, (int)len, &new_offset);
 	*offset = new_offset;
 
 	return *location == NULL ? ENOMEM : 0;
@@ -498,7 +500,7 @@ mbuf_adjustlen(mbuf_t m, int amount)
 {
 	/* Verify m_len will be valid after adding amount */
 	if (amount > 0) {
-		int used = (size_t)mbuf_data(m) - (size_t)mbuf_datastart(m) +
+		size_t used = (size_t)mbuf_data(m) - (size_t)mbuf_datastart(m) +
 		    m->m_len;
 
 		if ((size_t)(amount + used) > mbuf_maxlen(m)) {
@@ -611,7 +613,7 @@ mbuf_len(const mbuf_t mbuf)
 void
 mbuf_setlen(mbuf_t mbuf, size_t len)
 {
-	mbuf->m_len = len;
+	mbuf->m_len = (int32_t)len;
 }
 
 size_t
@@ -667,7 +669,7 @@ mbuf_setflags(mbuf_t mbuf, mbuf_flags_t flags)
 	} else if (flags & ~mbuf_flags_mask) {
 		ret = EINVAL;
 	} else {
-		mbuf->m_flags = flags | (mbuf->m_flags & ~mbuf_flags_mask);
+		mbuf->m_flags = (uint16_t)flags | (mbuf->m_flags & ~mbuf_flags_mask);
 		/*
 		 * If M_PKTHDR bit has changed, we have work to do;
 		 * m_reinit() will take care of setting/clearing the
@@ -692,7 +694,7 @@ mbuf_setflags_mask(mbuf_t mbuf, mbuf_flags_t flags, mbuf_flags_t mask)
 		ret = EINVAL;
 	} else {
 		mbuf_flags_t oflags = mbuf->m_flags;
-		mbuf->m_flags = (flags & mask) | (mbuf->m_flags & ~mask);
+		mbuf->m_flags = (uint16_t)((flags & mask) | (mbuf->m_flags & ~mask));
 		/*
 		 * If M_PKTHDR bit has changed, we have work to do;
 		 * m_reinit() will take care of setting/clearing the
@@ -758,7 +760,7 @@ mbuf_pkthdr_setlen(mbuf_t mbuf, size_t len)
 		len = INT32_MAX;
 	}
 
-	mbuf->m_pkthdr.len = len;
+	mbuf->m_pkthdr.len = (int)len;
 }
 
 void
@@ -810,18 +812,16 @@ mbuf_outbound_finalize(struct mbuf *m, u_int32_t pf, size_t o)
 	/* Generate the packet in software, client needs it */
 	switch (pf) {
 	case PF_INET:
-		(void) in_finalize_cksum(m, o, m->m_pkthdr.csum_flags);
+		(void) in_finalize_cksum(m, (uint32_t)o, m->m_pkthdr.csum_flags);
 		break;
 
 	case PF_INET6:
-#if INET6
 		/*
 		 * Checksum offload should not have been enabled when
 		 * extension headers exist; indicate that the callee
 		 * should skip such case by setting optlen to -1.
 		 */
-		(void) in6_finalize_cksum(m, o, -1, -1, m->m_pkthdr.csum_flags);
-#endif /* INET6 */
+		(void) in6_finalize_cksum(m, (uint32_t)o, -1, -1, m->m_pkthdr.csum_flags);
 		break;
 
 	default:
@@ -983,7 +983,6 @@ mbuf_inet_cksum(mbuf_t mbuf, int protocol, u_int32_t offset, u_int32_t length,
 	return 0;
 }
 
-#if INET6
 errno_t
 mbuf_inet6_cksum(mbuf_t mbuf, int protocol, u_int32_t offset, u_int32_t length,
     u_int16_t *csum)
@@ -996,45 +995,6 @@ mbuf_inet6_cksum(mbuf_t mbuf, int protocol, u_int32_t offset, u_int32_t length,
 	*csum = inet6_cksum(mbuf, protocol, offset, length);
 	return 0;
 }
-#else /* INET6 */
-errno_t
-mbuf_inet6_cksum(__unused mbuf_t mbuf, __unused int protocol,
-    __unused u_int32_t offset, __unused u_int32_t length,
-    __unused u_int16_t *csum)
-{
-	panic("mbuf_inet6_cksum() doesn't exist on this platform\n");
-	return 0;
-}
-
-u_int16_t
-inet6_cksum(__unused struct mbuf *m, __unused unsigned int nxt,
-    __unused unsigned int off, __unused unsigned int len)
-{
-	panic("inet6_cksum() doesn't exist on this platform\n");
-	return 0;
-}
-
-void nd6_lookup_ipv6(void);
-void
-nd6_lookup_ipv6(void)
-{
-	panic("nd6_lookup_ipv6() doesn't exist on this platform\n");
-}
-
-int
-in6addr_local(__unused struct in6_addr *a)
-{
-	panic("in6addr_local() doesn't exist on this platform\n");
-	return 0;
-}
-
-void nd6_storelladdr(void);
-void
-nd6_storelladdr(void)
-{
-	panic("nd6_storelladdr() doesn't exist on this platform\n");
-}
-#endif /* INET6 */
 
 /*
  * Mbuf tag KPIs
@@ -1082,7 +1042,7 @@ mbuf_tag_allocate(
 	}
 
 	/* Allocate an mtag */
-	tag = m_tag_create(id, type, length, how, mbuf);
+	tag = m_tag_create(id, type, (int)length, how, mbuf);
 	if (tag == NULL) {
 		return how == M_WAITOK ? ENOMEM : EWOULDBLOCK;
 	}
@@ -1193,14 +1153,14 @@ mbuf_add_drvaux(mbuf_t mbuf, mbuf_how_t how, u_int32_t family,
 
 	/* Tag is (m_drvaux_tag + module specific data) */
 	if ((tag = m_tag_create(KERNEL_MODULE_TAG_ID, KERNEL_TAG_TYPE_DRVAUX,
-	    sizeof(*p) + length, how, mbuf)) == NULL) {
+	    (int)(sizeof(*p) + length), how, mbuf)) == NULL) {
 		return (how == MBUF_WAITOK) ? ENOMEM : EWOULDBLOCK;
 	}
 
 	p = (struct m_drvaux_tag *)(tag + 1);
 	p->da_family = family;
 	p->da_subfamily = subfamily;
-	p->da_length = length;
+	p->da_length = (int)length;
 
 	/* Associate the tag */
 	m_tag_prepend(mbuf, tag);
@@ -1417,7 +1377,7 @@ mbuf_copyback(
 				result = ENOBUFS;
 				goto out;
 			}
-			n->m_len = MIN(MLEN, len + off);
+			n->m_len = (int32_t)MIN(MLEN, len + off);
 			m->m_next = n;
 		}
 		m = m->m_next;
@@ -1453,7 +1413,7 @@ mbuf_copyback(
 				 */
 				mbuf_mclget(how, m->m_type, &n);
 			}
-			n->m_len = MIN(mbuf_maxlen(n), len);
+			n->m_len = (int32_t)MIN(mbuf_maxlen(n), len);
 			m->m_next = n;
 		}
 		m = m->m_next;
@@ -1825,11 +1785,11 @@ get_tx_compl_callback_index(mbuf_tx_compl_func callback)
 {
 	u_int32_t i;
 
-	lck_rw_lock_shared(mbuf_tx_compl_tbl_lock);
+	lck_rw_lock_shared(&mbuf_tx_compl_tbl_lock);
 
 	i = get_tx_compl_callback_index_locked(callback);
 
-	lck_rw_unlock_shared(mbuf_tx_compl_tbl_lock);
+	lck_rw_unlock_shared(&mbuf_tx_compl_tbl_lock);
 
 	return i;
 }
@@ -1843,9 +1803,9 @@ m_get_tx_compl_callback(u_int32_t idx)
 		ASSERT(0);
 		return NULL;
 	}
-	lck_rw_lock_shared(mbuf_tx_compl_tbl_lock);
+	lck_rw_lock_shared(&mbuf_tx_compl_tbl_lock);
 	cb = mbuf_tx_compl_table[idx];
-	lck_rw_unlock_shared(mbuf_tx_compl_tbl_lock);
+	lck_rw_unlock_shared(&mbuf_tx_compl_tbl_lock);
 	return cb;
 }
 
@@ -1859,7 +1819,7 @@ mbuf_register_tx_compl_callback(mbuf_tx_compl_func callback)
 		return EINVAL;
 	}
 
-	lck_rw_lock_exclusive(mbuf_tx_compl_tbl_lock);
+	lck_rw_lock_exclusive(&mbuf_tx_compl_tbl_lock);
 
 	i = get_tx_compl_callback_index_locked(callback);
 	if (i != -1) {
@@ -1877,7 +1837,7 @@ mbuf_register_tx_compl_callback(mbuf_tx_compl_func callback)
 		}
 	}
 unlock:
-	lck_rw_unlock_exclusive(mbuf_tx_compl_tbl_lock);
+	lck_rw_unlock_exclusive(&mbuf_tx_compl_tbl_lock);
 
 	return error;
 }
@@ -1892,7 +1852,7 @@ mbuf_unregister_tx_compl_callback(mbuf_tx_compl_func callback)
 		return EINVAL;
 	}
 
-	lck_rw_lock_exclusive(mbuf_tx_compl_tbl_lock);
+	lck_rw_lock_exclusive(&mbuf_tx_compl_tbl_lock);
 
 	/* assume the worst */
 	error = ENOENT;
@@ -1904,7 +1864,7 @@ mbuf_unregister_tx_compl_callback(mbuf_tx_compl_func callback)
 		}
 	}
 unlock:
-	lck_rw_unlock_exclusive(mbuf_tx_compl_tbl_lock);
+	lck_rw_unlock_exclusive(&mbuf_tx_compl_tbl_lock);
 
 	return error;
 }
@@ -1940,6 +1900,8 @@ mbuf_set_timestamp_requested(mbuf_t m, uintptr_t *pktid,
 		return ENOENT;
 	}
 
+	m_add_crumb(m, PKT_CRUMB_TS_COMP_REQ);
+
 #if (DEBUG || DEVELOPMENT)
 	VERIFY(i < sizeof(m->m_pkthdr.pkt_compl_callbacks));
 #endif /* (DEBUG || DEVELOPMENT) */
@@ -1951,9 +1913,7 @@ mbuf_set_timestamp_requested(mbuf_t m, uintptr_t *pktid,
 		    atomic_add_32_ov(&mbuf_tx_compl_index, 1);
 
 #if (DEBUG || DEVELOPMENT)
-		if (mbuf_tx_compl_debug != 0) {
-			OSIncrementAtomic64(&mbuf_tx_compl_outstanding);
-		}
+		atomic_add_64(&mbuf_tx_compl_requested, 1);
 #endif /* (DEBUG || DEVELOPMENT) */
 	}
 	m->m_pkthdr.pkt_compl_callbacks |= (1 << i);
@@ -1975,6 +1935,8 @@ m_do_tx_compl_callback(struct mbuf *m, struct ifnet *ifp)
 		return;
 	}
 
+	m_add_crumb(m, PKT_CRUMB_TS_COMP_CB);
+
 #if (DEBUG || DEVELOPMENT)
 	if (mbuf_tx_compl_debug != 0 && ifp != NULL &&
 	    (ifp->if_xflags & IFXF_TIMESTAMP_ENABLED) != 0 &&
@@ -1993,9 +1955,9 @@ m_do_tx_compl_callback(struct mbuf *m, struct ifnet *ifp)
 			continue;
 		}
 
-		lck_rw_lock_shared(mbuf_tx_compl_tbl_lock);
+		lck_rw_lock_shared(&mbuf_tx_compl_tbl_lock);
 		callback = mbuf_tx_compl_table[i];
-		lck_rw_unlock_shared(mbuf_tx_compl_tbl_lock);
+		lck_rw_unlock_shared(&mbuf_tx_compl_tbl_lock);
 
 		if (callback != NULL) {
 			callback(m->m_pkthdr.pkt_compl_context,
@@ -2007,16 +1969,15 @@ m_do_tx_compl_callback(struct mbuf *m, struct ifnet *ifp)
 			    m->m_pkthdr.drv_tx_status);
 		}
 	}
-	m->m_pkthdr.pkt_compl_callbacks = 0;
-
 #if (DEBUG || DEVELOPMENT)
-	if (mbuf_tx_compl_debug != 0) {
-		OSDecrementAtomic64(&mbuf_tx_compl_outstanding);
+	if (m->m_pkthdr.pkt_compl_callbacks != 0) {
+		atomic_add_64(&mbuf_tx_compl_callbacks, 1);
 		if (ifp == NULL) {
 			atomic_add_64(&mbuf_tx_compl_aborted, 1);
 		}
 	}
 #endif /* (DEBUG || DEVELOPMENT) */
+	m->m_pkthdr.pkt_compl_callbacks = 0;
 }
 
 errno_t

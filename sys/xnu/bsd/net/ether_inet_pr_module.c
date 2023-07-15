@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2013 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -246,7 +246,7 @@ ether_inet_pre_output(ifnet_t ifp, protocol_family_t protocol_family,
 
 	switch (dst_netaddr->sa_family) {
 	case AF_INET: {
-		struct sockaddr_dl ll_dest;
+		struct sockaddr_dl ll_dest = {};
 
 		result = arp_lookup_ip(ifp,
 		    (const struct sockaddr_in *)(uintptr_t)(size_t)dst_netaddr,
@@ -454,10 +454,6 @@ ether_inet_arp(ifnet_t ifp, u_short arpop, const struct sockaddr_dl *sender_hw,
 	eh = mbuf_data(m);
 	eh->ether_type = htons(ETHERTYPE_ARP);
 
-#if CONFIG_MACF_NET
-	mac_mbuf_label_associate_linklayer(ifp, m);
-#endif
-
 	/* Fill out the arp header */
 	ea->arp_pro = htons(ETHERTYPE_IP);
 	ea->arp_hln = sizeof(ea->arp_sha);
@@ -546,7 +542,7 @@ ether_inet_arp(ifnet_t ifp, u_short arpop, const struct sockaddr_dl *sender_hw,
 		(void) m_set_service_class(m, MBUF_SC_CTL);
 	}
 
-	ifnet_output_raw(ifp, PF_INET, m);
+	ifnet_output_raw(ifp, IS_INTF_CLAT46(ifp) ? 0 : AF_INET, m);
 
 	return 0;
 }

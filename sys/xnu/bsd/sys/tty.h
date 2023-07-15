@@ -73,7 +73,9 @@
 #include <sys/cdefs.h>
 #include <sys/termios.h>
 #include <sys/select.h>         /* For struct selinfo. */
-
+#if XNU_KERNEL_PRIVATE
+#include <os/refcnt.h>
+#endif
 
 #ifdef KERNEL
 
@@ -124,8 +126,8 @@ struct tty {
 	int     t_state;                /* Device and driver (TS*) state. */
 	int     t_flags;                /* Tty flags. */
 	int     t_timeout;              /* Timeout for ttywait() */
-	struct  pgrp *t_pgrp;           /* Foreground process group. */
-	struct  session *t_session;     /* Enclosing session. */
+	struct  pgrp *t_pgrp;           /* (TTYL+LL) Foreground process group. */
+	struct  session *t_session;     /* (TTYL+LL) Enclosing session. */
 	struct  selinfo t_rsel;         /* Tty read/oob select. */
 	struct  selinfo t_wsel;         /* Tty write select. */
 	struct  termios t_termios;      /* Termios state. */
@@ -143,7 +145,11 @@ struct tty {
 	int     t_lowat;                /* Low water mark. */
 	int     t_gen;                  /* Generation number. */
 	void    *t_iokit;               /* IOKit management */
+#if XNU_KERNEL_PRIVATE
+	os_ref_atomic_t t_refcnt;
+#else
 	int     t_refcnt;               /* reference count */
+#endif
 };
 
 #define TTY_NULL (struct tty *)NULL
@@ -221,7 +227,7 @@ struct clist;
 #endif
 
 #define TS_IOCTL_NOT_OK 0x1000000       /* Workaround <rdar://....> */
-#define TS_PGRPHUP      0x2000000       /* Don't change Foregroud process group */
+#define TS_REVOKE       0x2000000       /* Terminal getting revoked */
 
 
 /* Character type information. */
@@ -234,8 +240,8 @@ struct clist;
 #define RETURN          6
 
 struct speedtab {
-	int sp_speed;                   /* Speed. */
-	int sp_code;                    /* Code. */
+	int sp_speed;
+	int sp_code;
 };
 
 /* Modem control commands (driver). */
@@ -327,8 +333,6 @@ int      ttysleep(struct tty *tp,
 int      ttywait(struct tty *tp);
 struct tty *ttymalloc(void);
 void     ttyfree(struct tty *);
-void     ttysetpgrphup(struct tty *tp);
-void     ttyclrpgrphup(struct tty *tp);
 
 #ifdef XNU_KERNEL_PRIVATE
 extern void ttyhold(struct tty *tp);

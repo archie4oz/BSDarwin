@@ -59,10 +59,6 @@ struct secashead {
 
 	struct secasindex saidx;
 
-	struct sadb_ident *idents;      /* source identity */
-	struct sadb_ident *identd;      /* destination identity */
-	                                /* XXX I don't know how to use them. */
-
 	ifnet_t ipsec_if;
 	u_int outgoing_if;
 	u_int8_t dir;                   /* IPSEC_DIR_INBOUND or IPSEC_DIR_OUTBOUND */
@@ -74,6 +70,7 @@ struct secashead {
 	struct route_in6 sa_route;              /* route cache */
 
 	uint16_t flags;
+	u_int32_t use_count;
 };
 
 #define MAX_REPLAY_WINDOWS 4
@@ -100,7 +97,7 @@ struct secasvar {
 
 	struct secreplay *replay[MAX_REPLAY_WINDOWS]; /* replay prevention */
 
-	long created;                   /* for lifetime */
+	u_int64_t created;              /* for lifetime */
 
 	struct sadb_lifetime *lft_c;    /* CURRENT lifetime, it's constant. */
 	struct sadb_lifetime *lft_h;    /* HARD lifetime */
@@ -119,14 +116,19 @@ struct secasvar {
 	u_int16_t       natt_encapsulated_src_port;     /* network byte order */
 	u_int16_t       natt_interval; /* Interval in seconds */
 	u_int16_t       natt_offload_interval; /* Hardware Offload Interval in seconds */
+	/*
+	 * Globally unique flow identifier for the SA.
+	 * Added on outgoing packets by the IPSec driver.
+	 */
+	uint32_t        flowid;
 
 	u_int8_t        always_expire; /* Send expire/delete messages even if unused */
 };
 
 /* replay prevention */
 struct secreplay {
-	u_int32_t count;
-	u_int wsize;            /* window size, i.g. 4 bytes */
+	u_int8_t wsize;         /* window size */
+	u_int32_t count;        /* used by sender/receiver */
 	u_int32_t seq;          /* used by sender */
 	u_int32_t lastseq;      /* used by sender/receiver */
 	caddr_t bitmap;         /* used by receiver */
@@ -148,7 +150,7 @@ struct secacq {
 	struct secasindex saidx;
 
 	u_int32_t seq;          /* sequence number */
-	long created;           /* for lifetime */
+	u_int64_t created;      /* for lifetime */
 	int count;              /* for lifetime */
 };
 #endif
@@ -174,7 +176,7 @@ extern struct secashead *keydb_newsecashead(void);
 // extern void keydb_refsecasvar(struct secasvar *);	// not used
 // extern void keydb_freesecasvar(struct secasvar *);	// not used
 /* secreplay */
-extern struct secreplay *keydb_newsecreplay(size_t);
+extern struct secreplay *keydb_newsecreplay(u_int8_t);
 extern void keydb_delsecreplay(struct secreplay *);
 /* secreg */
 // extern struct secreg *keydb_newsecreg(void);			// not used

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2020 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -78,13 +78,12 @@
  *		  to truncate the output.
  */
 static int
-kern_asl_msg_va(int level, const char *facility, int num_pairs, va_list vargs)
+kern_asl_msg_va(int level, const char *facility, size_t num_pairs, va_list vargs)
 {
 	int err = 0;
 	char fmt[MAX_FMT_LEN];  /* Format string to use with vaddlog */
-	int calc_pairs = 0;
+	size_t calc_pairs = 0;
 	size_t len;
-	int i;
 
 	/* Mask extra bits, if any, from priority level */
 	level = LOG_PRI(level);
@@ -120,15 +119,18 @@ kern_asl_msg_va(int level, const char *facility, int num_pairs, va_list vargs)
 
 	/* Append format strings [%s %s] for the key-value pairs in vargs */
 	len = MAX_FMT_LEN - KASL_NEWLINE_CHAR_LEN;
-	for (i = 0; i < calc_pairs; i++) {
+	for (size_t i = 0; i < calc_pairs; i++) {
 		(void) strlcat(fmt, KASL_KEYVAL_FMT, len);
 	}
 
 	/* Append newline */
 	(void) strlcat(fmt, KASL_NEWLINE_CHAR, MAX_FMT_LEN);
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wformat-nonliteral"
 	/* Print the key-value pairs in ASL format */
 	vaddlog(fmt, vargs);
+#pragma clang diagnostic pop
 
 	/*
 	 * Note: can't use os_log_with_args() here because 'fmt' is
@@ -141,7 +143,7 @@ kern_asl_msg_va(int level, const char *facility, int num_pairs, va_list vargs)
 }
 
 int
-kern_asl_msg(int level, const char *facility, int num_pairs, ...)
+kern_asl_msg(int level, const char *facility, size_t num_pairs, ...)
 {
 	int err;
 	va_list ap;
@@ -164,9 +166,9 @@ kern_asl_msg(int level, const char *facility, int num_pairs, ...)
  *	buflen - size of buffer that contains the string
  */
 int
-escape_str(char *str, int len, int buflen)
+escape_str(char *str, size_t len, size_t buflen)
 {
-	int count;
+	size_t count;
 	char *src, *dst;
 
 	/* Count number of characters to escape */

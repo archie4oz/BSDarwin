@@ -85,12 +85,10 @@
 #include <netinet/ip.h>
 #endif
 
-#if INET6
 #if !INET
 #include <netinet/in.h>
 #endif
 #include <netinet6/nd6.h>
-#endif /* INET6 */
 
 #include <net/pfvar.h>
 #include <net/if_pflog.h>
@@ -119,7 +117,7 @@ static void pflogfree(struct ifnet *);
 static LIST_HEAD(, pflog_softc) pflogif_list;
 static struct if_clone pflog_cloner =
     IF_CLONE_INITIALIZER(PFLOGNAME, pflog_clone_create, pflog_clone_destroy,
-    0, (PFLOGIFS_MAX - 1), PFLOGIF_ZONE_MAX_ELEM, sizeof(struct pflog_softc));
+    0, (PFLOGIFS_MAX - 1));
 
 struct ifnet *pflogifs[PFLOGIFS_MAX];   /* for fast access */
 
@@ -150,10 +148,7 @@ pflog_clone_create(struct if_clone *ifc, u_int32_t unit, __unused void *params)
 		/* NOTREACHED */
 	}
 
-	if ((pflogif = if_clone_softc_allocate(&pflog_cloner)) == NULL) {
-		error = ENOMEM;
-		goto done;
-	}
+	pflogif = kalloc_type(struct pflog_softc, Z_WAITOK_ZERO_NOFAIL);
 
 	bzero(&pf_init, sizeof(pf_init));
 	pf_init.ver = IFNET_INIT_CURRENT_VERSION;
@@ -171,14 +166,13 @@ pflog_clone_create(struct if_clone *ifc, u_int32_t unit, __unused void *params)
 	pf_init.ioctl = pflogioctl;
 	pf_init.detach = pflogfree;
 
-	bzero(pflogif, sizeof(*pflogif));
 	pflogif->sc_unit = unit;
 	pflogif->sc_flags |= IFPFLF_DETACHING;
 
 	error = ifnet_allocate_extended(&pf_init, &pflogif->sc_if);
 	if (error != 0) {
 		printf("%s: ifnet_allocate failed - %d\n", __func__, error);
-		if_clone_softc_deallocate(&pflog_cloner, pflogif);
+		kfree_type(struct pflog_softc, pflogif);
 		goto done;
 	}
 
@@ -189,7 +183,7 @@ pflog_clone_create(struct if_clone *ifc, u_int32_t unit, __unused void *params)
 	if (error != 0) {
 		printf("%s: ifnet_attach failed - %d\n", __func__, error);
 		ifnet_release(pflogif->sc_if);
-		if_clone_softc_deallocate(&pflog_cloner, pflogif);
+		kfree_type(struct pflog_softc, pflogif);
 		goto done;
 	}
 
@@ -197,13 +191,13 @@ pflog_clone_create(struct if_clone *ifc, u_int32_t unit, __unused void *params)
 	bpfattach(pflogif->sc_if, DLT_PFLOG, PFLOG_HDRLEN);
 #endif
 
-	lck_rw_lock_shared(pf_perim_lock);
-	lck_mtx_lock(pf_lock);
+	lck_rw_lock_shared(&pf_perim_lock);
+	lck_mtx_lock(&pf_lock);
 	LIST_INSERT_HEAD(&pflogif_list, pflogif, sc_list);
 	pflogifs[unit] = pflogif->sc_if;
 	pflogif->sc_flags &= ~IFPFLF_DETACHING;
-	lck_mtx_unlock(pf_lock);
-	lck_rw_done(pf_perim_lock);
+	lck_mtx_unlock(&pf_lock);
+	lck_rw_done(&pf_perim_lock);
 
 done:
 	return error;
@@ -215,8 +209,8 @@ pflog_remove(struct ifnet *ifp)
 	int error = 0;
 	struct pflog_softc *pflogif = NULL;
 
-	lck_rw_lock_shared(pf_perim_lock);
-	lck_mtx_lock(pf_lock);
+	lck_rw_lock_shared(&pf_perim_lock);
+	lck_mtx_lock(&pf_lock);
 	pflogif = ifp->if_softc;
 
 	if (pflogif == NULL ||
@@ -228,8 +222,8 @@ pflog_remove(struct ifnet *ifp)
 	pflogif->sc_flags |= IFPFLF_DETACHING;
 	LIST_REMOVE(pflogif, sc_list);
 done:
-	lck_mtx_unlock(pf_lock);
-	lck_rw_done(pf_perim_lock);
+	lck_mtx_unlock(&pf_lock);
+	lck_rw_done(&pf_perim_lock);
 	return error;
 }
 
@@ -304,7 +298,7 @@ pflogdelproto(struct ifnet *ifp, protocol_family_t pf)
 static void
 pflogfree(struct ifnet *ifp)
 {
-	if_clone_softc_deallocate(&pflog_cloner, ifp->if_softc);
+	kfree_type(struct pflog_softc, ifp->if_softc);
 	ifp->if_softc = NULL;
 	(void) ifnet_release(ifp);
 }
@@ -319,7 +313,7 @@ pflog_packet(struct pfi_kif *kif, pbuf_t *pbuf, sa_family_t af, u_int8_t dir,
 	struct pfloghdr hdr;
 	struct mbuf *m;
 
-	LCK_MTX_ASSERT(pf_lock, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(&pf_lock, LCK_MTX_ASSERT_OWNED);
 
 	if (kif == NULL || !pbuf_is_valid(pbuf) || rm == NULL || pd == NULL) {
 		return -1;

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -97,11 +97,8 @@
 #include <netinet/in_var.h>
 #include <netinet/ip_var.h>
 
-#if INET6
 #include <netinet6/in6_pcb.h>
-#endif /* INET6 */
 
-#include <netinet/ip_fw.h>
 
 #if IPSEC
 #include <netinet6/ipsec.h>
@@ -109,13 +106,8 @@
 
 #if DUMMYNET
 #include <netinet/ip_dummynet.h>
-#endif
+#endif /* DUMMYNET */
 
-#if CONFIG_MACF_NET
-#include <security/mac_framework.h>
-#endif /* MAC_NET */
-
-int load_ipfw(void);
 int rip_detach(struct socket *);
 int rip_abort(struct socket *);
 int rip_disconnect(struct socket *);
@@ -126,10 +118,7 @@ int rip_shutdown(struct socket *);
 struct  inpcbhead ripcb;
 struct  inpcbinfo ripcbinfo;
 
-/* control hooks for ipfw and dummynet */
-#if IPFIREWALL
-ip_fw_ctl_t *ip_fw_ctl_ptr;
-#endif /* IPFIREWALL */
+/* control hooks for dummynet */
 #if DUMMYNET
 ip_dn_ctl_t *ip_dn_ctl_ptr;
 #endif /* DUMMYNET */
@@ -139,6 +128,8 @@ ip_dn_ctl_t *ip_dn_ctl_ptr;
  */
 #define RIPSNDQ         8192
 #define RIPRCVQ         8192
+
+static KALLOC_TYPE_DEFINE(ripzone, struct inpcb, NET_KT_DEFAULT);
 
 /*
  * Raw interface to IP protocol.
@@ -171,25 +162,20 @@ rip_init(struct protosw *pp, struct domain *dp)
 	ripcbinfo.ipi_hashbase = hashinit(1, M_PCB, &ripcbinfo.ipi_hashmask);
 	ripcbinfo.ipi_porthashbase = hashinit(1, M_PCB, &ripcbinfo.ipi_porthashmask);
 
-	ripcbinfo.ipi_zone = zinit(sizeof(struct inpcb),
-	    (4096 * sizeof(struct inpcb)), 4096, "ripzone");
+	ripcbinfo.ipi_zone.zov_kt_heap = ripzone;
 
 	pcbinfo = &ripcbinfo;
 	/*
 	 * allocate lock group attribute and group for udp pcb mutexes
 	 */
-	pcbinfo->ipi_lock_grp_attr = lck_grp_attr_alloc_init();
-	pcbinfo->ipi_lock_grp = lck_grp_alloc_init("ripcb", pcbinfo->ipi_lock_grp_attr);
+	pcbinfo->ipi_lock_grp = lck_grp_alloc_init("ripcb", LCK_GRP_ATTR_NULL);
 
 	/*
 	 * allocate the lock attribute for udp pcb mutexes
 	 */
-	pcbinfo->ipi_lock_attr = lck_attr_alloc_init();
-	if ((pcbinfo->ipi_lock = lck_rw_alloc_init(pcbinfo->ipi_lock_grp,
-	    pcbinfo->ipi_lock_attr)) == NULL) {
-		panic("%s: unable to allocate PCB lock\n", __func__);
-		/* NOTREACHED */
-	}
+	lck_attr_setdefault(&pcbinfo->ipi_lock_attr);
+	lck_rw_init(&pcbinfo->ipi_lock, pcbinfo->ipi_lock_grp,
+	    &pcbinfo->ipi_lock_attr);
 
 	in_pcbinfo_attach(&ripcbinfo);
 }
@@ -216,18 +202,21 @@ rip_input(struct mbuf *m, int iphlen)
 	struct mbuf *opts = 0;
 	int skipit = 0, ret = 0;
 	struct ifnet *ifp = m->m_pkthdr.rcvif;
+	boolean_t is_wake_pkt = false;
 
 	/* Expect 32-bit aligned data pointer on strict-align platforms */
 	MBUF_STRICT_DATA_ALIGNMENT_CHECK_32(m);
 
+	if ((m->m_flags & M_PKTHDR) && (m->m_pkthdr.pkt_flags & PKTF_WAKE_PKT)) {
+		is_wake_pkt = true;
+	}
+
 	ripsrc.sin_addr = ip->ip_src;
-	lck_rw_lock_shared(ripcbinfo.ipi_lock);
+	lck_rw_lock_shared(&ripcbinfo.ipi_lock);
 	LIST_FOREACH(inp, &ripcb, inp_list) {
-#if INET6
 		if ((inp->inp_vflag & INP_IPV4) == 0) {
 			continue;
 		}
-#endif
 		if (inp->inp_ip_p && (inp->inp_ip_p != ip->ip_p)) {
 			continue;
 		}
@@ -249,27 +238,17 @@ rip_input(struct mbuf *m, int iphlen)
 
 #if NECP
 			if (n && !necp_socket_is_allowed_to_send_recv_v4(last, 0, 0,
-			    &ip->ip_dst, &ip->ip_src, ifp, NULL, NULL, NULL)) {
+			    &ip->ip_dst, &ip->ip_src, ifp, 0, NULL, NULL, NULL, NULL)) {
 				m_freem(n);
 				/* do not inject data to pcb */
 				skipit = 1;
 			}
 #endif /* NECP */
-#if CONFIG_MACF_NET
-			if (n && skipit == 0) {
-				if (mac_inpcb_check_deliver(last, n, AF_INET,
-				    SOCK_RAW) != 0) {
-					m_freem(n);
-					skipit = 1;
-				}
-			}
-#endif
 			if (n && skipit == 0) {
 				int error = 0;
 				if ((last->inp_flags & INP_CONTROLOPTS) != 0 ||
-				    (last->inp_socket->so_options & SO_TIMESTAMP) != 0 ||
-				    (last->inp_socket->so_options & SO_TIMESTAMP_MONOTONIC) != 0 ||
-				    (last->inp_socket->so_options & SO_TIMESTAMP_CONTINUOUS) != 0) {
+				    SOFLOW_ENABLED(last->inp_socket) ||
+				    SO_RECV_CONTROL_OPTS(last->inp_socket)) {
 					ret = ip_savecontrol(last, &opts, ip, n);
 					if (ret != 0) {
 						m_freem(n);
@@ -283,7 +262,7 @@ rip_input(struct mbuf *m, int iphlen)
 				    /*
 				     * If socket is subject to Content Filter, delay stripping until reinject
 				     */
-				    && (last->inp_socket->so_cfil_db == NULL)
+				    && (!CFIL_DGRAM_FILTERED(last->inp_socket))
 #endif
 				    ) {
 					n->m_len -= iphlen;
@@ -301,6 +280,10 @@ rip_input(struct mbuf *m, int iphlen)
 						ipstat.ips_raw_sappend_fail++;
 					}
 				}
+				if (is_wake_pkt) {
+					soevent(last->in6p_socket,
+					    SO_FILT_HINT_LOCKED | SO_FILT_HINT_WAKE_PKT);
+				}
 				opts = 0;
 			}
 		}
@@ -310,27 +293,18 @@ rip_input(struct mbuf *m, int iphlen)
 	skipit = 0;
 #if NECP
 	if (last && !necp_socket_is_allowed_to_send_recv_v4(last, 0, 0,
-	    &ip->ip_dst, &ip->ip_src, ifp, NULL, NULL, NULL)) {
+	    &ip->ip_dst, &ip->ip_src, ifp, 0, NULL, NULL, NULL, NULL)) {
 		m_freem(m);
 		OSAddAtomic(1, &ipstat.ips_delivered);
 		/* do not inject data to pcb */
 		skipit = 1;
 	}
 #endif /* NECP */
-#if CONFIG_MACF_NET
-	if (last && skipit == 0) {
-		if (mac_inpcb_check_deliver(last, m, AF_INET, SOCK_RAW) != 0) {
-			skipit = 1;
-			m_freem(m);
-		}
-	}
-#endif
 	if (skipit == 0) {
 		if (last) {
 			if ((last->inp_flags & INP_CONTROLOPTS) != 0 ||
-			    (last->inp_socket->so_options & SO_TIMESTAMP) != 0 ||
-			    (last->inp_socket->so_options & SO_TIMESTAMP_MONOTONIC) != 0 ||
-			    (last->inp_socket->so_options & SO_TIMESTAMP_CONTINUOUS) != 0) {
+			    SOFLOW_ENABLED(last->inp_socket) ||
+			    SO_RECV_CONTROL_OPTS(last->inp_socket)) {
 				ret = ip_savecontrol(last, &opts, ip, m);
 				if (ret != 0) {
 					m_freem(m);
@@ -343,7 +317,7 @@ rip_input(struct mbuf *m, int iphlen)
 			    /*
 			     * If socket is subject to Content Filter, delay stripping until reinject
 			     */
-			    && (last->inp_socket->so_cfil_db == NULL)
+			    && (!CFIL_DGRAM_FILTERED(last->inp_socket))
 #endif
 			    ) {
 				m->m_len -= iphlen;
@@ -357,6 +331,10 @@ rip_input(struct mbuf *m, int iphlen)
 			} else {
 				ipstat.ips_raw_sappend_fail++;
 			}
+			if (is_wake_pkt) {
+				soevent(last->in6p_socket,
+				    SO_FILT_HINT_LOCKED | SO_FILT_HINT_WAKE_PKT);
+			}
 		} else {
 			m_freem(m);
 			OSAddAtomic(1, &ipstat.ips_noproto);
@@ -368,7 +346,7 @@ unlock:
 	 * Keep the list locked because socket filter may force the socket lock
 	 * to be released when calling sbappendaddr() -- see rdar://7627704
 	 */
-	lck_rw_done(ripcbinfo.ipi_lock);
+	lck_rw_done(&ripcbinfo.ipi_lock);
 }
 
 /*
@@ -394,10 +372,11 @@ rip_output(
 	struct m_tag *cfil_tag = NULL;
 	bool cfil_faddr_use = false;
 	uint32_t cfil_so_state_change_cnt = 0;
-	short cfil_so_options = 0;
+	uint32_t cfil_so_options = 0;
 	int cfil_inp_flags = 0;
 	struct sockaddr *cfil_faddr = NULL;
 	struct sockaddr_in *cfil_sin;
+	u_int32_t cfil_dst = 0;
 #endif
 
 #if CONTENT_FILTER
@@ -405,7 +384,7 @@ rip_output(
 	 * If socket is subject to Content Filter and no addr is passed in,
 	 * retrieve CFIL saved state from mbuf and use it if necessary.
 	 */
-	if (so->so_cfil_db && dst == INADDR_ANY) {
+	if (CFIL_DGRAM_FILTERED(so) && dst == INADDR_ANY) {
 		cfil_tag = cfil_dgram_get_socket_state(m, &cfil_so_state_change_cnt, &cfil_so_options, &cfil_faddr, &cfil_inp_flags);
 		if (cfil_tag) {
 			cfil_sin = SIN(cfil_faddr);
@@ -425,6 +404,7 @@ rip_output(
 				 * We need to use the saved faddr and socket options.
 				 */
 				cfil_faddr_use = true;
+				cfil_dst = cfil_sin->sin_addr.s_addr;
 			}
 			m_tag_free(cfil_tag);
 		}
@@ -441,7 +421,7 @@ rip_output(
 			}
 			return EISCONN;
 		}
-		dst = cfil_faddr_use ? cfil_sin->sin_addr.s_addr : inp->inp_faddr.s_addr;
+		dst = cfil_faddr_use ? cfil_dst : inp->inp_faddr.s_addr;
 	} else {
 		if (dst == INADDR_ANY) {
 			if (m != NULL) {
@@ -508,7 +488,8 @@ rip_output(
 	ipoa.ipoa_netsvctype = netsvctype;
 
 	if (inp->inp_flowhash == 0) {
-		inp->inp_flowhash = inp_calc_flowhash(inp);
+		inp_calc_flowhash(inp);
+		ASSERT(inp->inp_flowhash != 0);
 	}
 
 	/*
@@ -530,9 +511,13 @@ rip_output(
 		} else {
 			ip->ip_tos = inp->inp_ip_tos;
 		}
-		ip->ip_off = 0;
+		if (inp->inp_flags2 & INP2_DONTFRAG) {
+			ip->ip_off = IP_DF;
+		} else {
+			ip->ip_off = 0;
+		}
 		ip->ip_p = inp->inp_ip_p;
-		ip->ip_len = m->m_pkthdr.len;
+		ip->ip_len = (uint16_t)m->m_pkthdr.len;
 		ip->ip_src = inp->inp_laddr;
 		ip->ip_dst.s_addr = dst;
 		ip->ip_ttl = inp->inp_ip_ttl;
@@ -542,17 +527,19 @@ rip_output(
 			return EMSGSIZE;
 		}
 		ip = mtod(m, struct ip *);
-		/* don't allow both user specified and setsockopt options,
-		 *  and don't allow packet length sizes that will crash */
-		if (((IP_VHL_HL(ip->ip_vhl) != (sizeof(*ip) >> 2))
-		    && inp->inp_options)
-		    || (ip->ip_len > m->m_pkthdr.len)
-		    || (ip->ip_len < (IP_VHL_HL(ip->ip_vhl) << 2))) {
+		/*
+		 * don't allow both user specified and setsockopt options,
+		 * and don't allow packet length sizes that will crash
+		 */
+		if (m->m_pkthdr.len < sizeof(struct ip) ||
+		    ((IP_VHL_HL(ip->ip_vhl) != (sizeof(*ip) >> 2)) && inp->inp_options) ||
+		    (ip->ip_len > m->m_pkthdr.len) ||
+		    (ip->ip_len < (IP_VHL_HL(ip->ip_vhl) << 2))) {
 			m_freem(m);
 			return EINVAL;
 		}
 		if (ip->ip_id == 0 && !(rfc6864 && IP_OFF_IS_ATOMIC(ntohs(ip->ip_off)))) {
-			ip->ip_id = ip_randomid();
+			ip->ip_id = ip_randomid((uint64_t)m);
 		}
 		/* XXX prevent ip_output from overwriting header fields */
 		flags |= IP_RAWOUTPUT;
@@ -568,6 +555,7 @@ rip_output(
 		necp_kernel_policy_id policy_id;
 		necp_kernel_policy_id skip_policy_id;
 		u_int32_t route_rule_id;
+		u_int32_t pass_flags;
 
 		/*
 		 * We need a route to perform NECP route rule checks
@@ -608,12 +596,12 @@ rip_output(
 		}
 
 		if (!necp_socket_is_allowed_to_send_recv_v4(inp, 0, 0,
-		    &ip->ip_src, &ip->ip_dst, NULL, &policy_id, &route_rule_id, &skip_policy_id)) {
+		    &ip->ip_src, &ip->ip_dst, NULL, 0, &policy_id, &route_rule_id, &skip_policy_id, &pass_flags)) {
 			m_freem(m);
 			return EHOSTUNREACH;
 		}
 
-		necp_mark_packet_from_socket(m, inp, policy_id, route_rule_id, skip_policy_id);
+		necp_mark_packet_from_socket(m, inp, policy_id, route_rule_id, skip_policy_id, pass_flags);
 
 		if (net_qos_policy_restricted != 0) {
 			struct ifnet *rt_ifp = NULL;
@@ -622,15 +610,13 @@ rip_output(
 				rt_ifp = inp->inp_route.ro_rt->rt_ifp;
 			}
 
-			necp_socket_update_qos_marking(inp, inp->inp_route.ro_rt,
-			    NULL, route_rule_id);
+			necp_socket_update_qos_marking(inp, inp->inp_route.ro_rt, route_rule_id);
 		}
 	}
 #endif /* NECP */
 	if ((so->so_flags1 & SOF1_QOSMARKING_ALLOWED)) {
 		ipoa.ipoa_flags |= IPOAF_QOSMARKING_ALLOWED;
 	}
-
 #if IPSEC
 	if (inp->inp_sp != NULL && ipsec_setsocket(m, so) != 0) {
 		m_freem(m);
@@ -655,10 +641,12 @@ rip_output(
 	} else {
 		m->m_pkthdr.tx_rawip_e_pid = 0;
 	}
-
-#if CONFIG_MACF_NET
-	mac_mbuf_label_associate_inpcb(inp, m);
-#endif
+#if (DEBUG || DEVELOPMENT)
+	if (so->so_flags & SOF_MARK_WAKE_PKT) {
+		so->so_flags &= ~SOF_MARK_WAKE_PKT;
+		m->m_pkthdr.pkt_flags |= PKTF_WAKE_PKT;
+	}
+#endif /* (DEBUG || DEVELOPMENT) */
 
 	imo = inp->inp_moptions;
 	if (imo != NULL) {
@@ -715,7 +703,7 @@ rip_output(
 	 * If output interface was cellular/expensive/constrained, and this socket is
 	 * denied access to it, generate an event.
 	 */
-	if (error != 0 && (ipoa.ipoa_retflags & IPOARF_IFDENIED) &&
+	if (error != 0 && (ipoa.ipoa_flags & IPOAF_R_IFDENIED) &&
 	    (INP_NO_CELLULAR(inp) || INP_NO_EXPENSIVE(inp) || INP_NO_CONSTRAINED(inp))) {
 		soevent(so, (SO_FILT_HINT_LOCKED | SO_FILT_HINT_IFDENIED));
 	}
@@ -723,24 +711,6 @@ rip_output(
 	return error;
 }
 
-#if IPFIREWALL
-int
-load_ipfw(void)
-{
-	kern_return_t   err;
-
-	ipfw_init();
-
-#if DUMMYNET
-	if (!DUMMYNET_LOADED) {
-		ip_dn_init();
-	}
-#endif /* DUMMYNET */
-	err = 0;
-
-	return err == 0 && ip_fw_ctl_ptr == NULL ? -1 : err;
-}
-#endif /* IPFIREWALL */
 
 /*
  * Raw IP socket option processing.
@@ -772,21 +742,6 @@ rip_ctloutput(struct socket *so, struct sockopt *sopt)
 			error = sooptcopyout(sopt, &optval, sizeof optval);
 			break;
 
-#if IPFIREWALL
-		case IP_FW_ADD:
-		case IP_FW_GET:
-		case IP_OLD_FW_ADD:
-		case IP_OLD_FW_GET:
-			if (ip_fw_ctl_ptr == 0) {
-				error = load_ipfw();
-			}
-			if (ip_fw_ctl_ptr && error == 0) {
-				error = ip_fw_ctl_ptr(sopt);
-			} else {
-				error = ENOPROTOOPT;
-			}
-			break;
-#endif /* IPFIREWALL */
 
 #if DUMMYNET
 		case IP_DUMMYNET_GET:
@@ -835,27 +790,6 @@ rip_ctloutput(struct socket *so, struct sockopt *sopt)
 			}
 			break;
 
-#if IPFIREWALL
-		case IP_FW_ADD:
-		case IP_FW_DEL:
-		case IP_FW_FLUSH:
-		case IP_FW_ZERO:
-		case IP_FW_RESETLOG:
-		case IP_OLD_FW_ADD:
-		case IP_OLD_FW_DEL:
-		case IP_OLD_FW_FLUSH:
-		case IP_OLD_FW_ZERO:
-		case IP_OLD_FW_RESETLOG:
-			if (ip_fw_ctl_ptr == 0) {
-				error = load_ipfw();
-			}
-			if (ip_fw_ctl_ptr && error == 0) {
-				error = ip_fw_ctl_ptr(sopt);
-			} else {
-				error = ENOPROTOOPT;
-			}
-			break;
-#endif /* IPFIREWALL */
 
 #if DUMMYNET
 		case IP_DUMMYNET_CONFIGURE:
@@ -870,7 +804,7 @@ rip_ctloutput(struct socket *so, struct sockopt *sopt)
 				error = ENOPROTOOPT;
 			}
 			break;
-#endif
+#endif /* DUMMYNET */
 
 		case SO_FLUSH:
 			if ((error = sooptcopyin(sopt, &optval, sizeof(optval),
@@ -912,7 +846,7 @@ rip_ctlinput(
 
 	switch (cmd) {
 	case PRC_IFDOWN:
-		lck_rw_lock_shared(in_ifaddr_rwlock);
+		lck_rw_lock_shared(&in_ifaddr_rwlock);
 		for (ia = in_ifaddrhead.tqh_first; ia;
 		    ia = ia->ia_link.tqe_next) {
 			IFA_LOCK(&ia->ia_ifa);
@@ -921,7 +855,7 @@ rip_ctlinput(
 				done = 1;
 				IFA_ADDREF_LOCKED(&ia->ia_ifa);
 				IFA_UNLOCK(&ia->ia_ifa);
-				lck_rw_done(in_ifaddr_rwlock);
+				lck_rw_done(&in_ifaddr_rwlock);
 				lck_mtx_lock(rnh_lock);
 				/*
 				 * in_ifscrub kills the interface route.
@@ -941,12 +875,12 @@ rip_ctlinput(
 			IFA_UNLOCK(&ia->ia_ifa);
 		}
 		if (!done) {
-			lck_rw_done(in_ifaddr_rwlock);
+			lck_rw_done(&in_ifaddr_rwlock);
 		}
 		break;
 
 	case PRC_IFUP:
-		lck_rw_lock_shared(in_ifaddr_rwlock);
+		lck_rw_lock_shared(&in_ifaddr_rwlock);
 		for (ia = in_ifaddrhead.tqh_first; ia;
 		    ia = ia->ia_link.tqe_next) {
 			IFA_LOCK(&ia->ia_ifa);
@@ -961,12 +895,12 @@ rip_ctlinput(
 			if (ia != NULL) {
 				IFA_UNLOCK(&ia->ia_ifa);
 			}
-			lck_rw_done(in_ifaddr_rwlock);
+			lck_rw_done(&in_ifaddr_rwlock);
 			return;
 		}
 		IFA_ADDREF_LOCKED(&ia->ia_ifa);
 		IFA_UNLOCK(&ia->ia_ifa);
-		lck_rw_done(in_ifaddr_rwlock);
+		lck_rw_done(&in_ifaddr_rwlock);
 
 		flags = RTF_UP;
 		iaifp = ia->ia_ifa.ifa_ifp;
@@ -1010,6 +944,9 @@ rip_attach(struct socket *so, int proto, struct proc *p)
 	if ((so->so_state & SS_PRIV) == 0) {
 		return EPERM;
 	}
+	if (proto > UINT8_MAX) {
+		return EINVAL;
+	}
 
 	error = soreserve(so, rip_sendspace, rip_recvspace);
 	if (error) {
@@ -1021,8 +958,9 @@ rip_attach(struct socket *so, int proto, struct proc *p)
 	}
 	inp = (struct inpcb *)so->so_pcb;
 	inp->inp_vflag |= INP_IPV4;
-	inp->inp_ip_p = proto;
-	inp->inp_ip_ttl = ip_defttl;
+	VERIFY(proto <= UINT8_MAX);
+	inp->inp_ip_p = (u_char)proto;
+	inp->inp_ip_ttl = (u_char)ip_defttl;
 	return 0;
 }
 
@@ -1205,7 +1143,7 @@ rip_unlock(struct socket *so, int refcount, void *debug)
 
 	if (refcount) {
 		if (so->so_usecount <= 0) {
-			panic("rip_unlock: bad refoucnt so=%p val=%x lrh= %s\n",
+			panic("rip_unlock: bad refoucnt so=%p val=%x lrh= %s",
 			    so, so->so_usecount, solockhistory_nr(so));
 			/* NOTREACHED */
 		}
@@ -1213,17 +1151,16 @@ rip_unlock(struct socket *so, int refcount, void *debug)
 		if (so->so_usecount == 0 && (inp->inp_wantcnt == WNT_STOPUSING)) {
 			/* cleanup after last reference */
 			lck_mtx_unlock(so->so_proto->pr_domain->dom_mtx);
-			lck_rw_lock_exclusive(ripcbinfo.ipi_lock);
+			lck_rw_lock_exclusive(&ripcbinfo.ipi_lock);
 			if (inp->inp_state != INPCB_STATE_DEAD) {
-#if INET6
 				if (SOCK_CHECK_DOM(so, PF_INET6)) {
 					in6_pcbdetach(inp);
-				} else
-#endif /* INET6 */
-				in_pcbdetach(inp);
+				} else {
+					in_pcbdetach(inp);
+				}
 			}
 			in_pcbdispose(inp);
-			lck_rw_done(ripcbinfo.ipi_lock);
+			lck_rw_done(&ripcbinfo.ipi_lock);
 			return 0;
 		}
 	}
@@ -1237,7 +1174,7 @@ static int
 rip_pcblist SYSCTL_HANDLER_ARGS
 {
 #pragma unused(oidp, arg1, arg2)
-	int error, i, n;
+	int error, i, n, sz;
 	struct inpcb *inp, **inp_list;
 	inp_gen_t gencnt;
 	struct xinpgen xig;
@@ -1246,17 +1183,17 @@ rip_pcblist SYSCTL_HANDLER_ARGS
 	 * The process of preparing the TCB list is too time-consuming and
 	 * resource-intensive to repeat twice on every request.
 	 */
-	lck_rw_lock_exclusive(ripcbinfo.ipi_lock);
+	lck_rw_lock_exclusive(&ripcbinfo.ipi_lock);
 	if (req->oldptr == USER_ADDR_NULL) {
 		n = ripcbinfo.ipi_count;
 		req->oldidx = 2 * (sizeof xig)
 		    + (n + n / 8) * sizeof(struct xinpcb);
-		lck_rw_done(ripcbinfo.ipi_lock);
+		lck_rw_done(&ripcbinfo.ipi_lock);
 		return 0;
 	}
 
 	if (req->newptr != USER_ADDR_NULL) {
-		lck_rw_done(ripcbinfo.ipi_lock);
+		lck_rw_done(&ripcbinfo.ipi_lock);
 		return EPERM;
 	}
 
@@ -1264,7 +1201,7 @@ rip_pcblist SYSCTL_HANDLER_ARGS
 	 * OK, now we're committed to doing something.
 	 */
 	gencnt = ripcbinfo.ipi_gencnt;
-	n = ripcbinfo.ipi_count;
+	sz = n = ripcbinfo.ipi_count;
 
 	bzero(&xig, sizeof(xig));
 	xig.xig_len = sizeof xig;
@@ -1273,20 +1210,20 @@ rip_pcblist SYSCTL_HANDLER_ARGS
 	xig.xig_sogen = so_gencnt;
 	error = SYSCTL_OUT(req, &xig, sizeof xig);
 	if (error) {
-		lck_rw_done(ripcbinfo.ipi_lock);
+		lck_rw_done(&ripcbinfo.ipi_lock);
 		return error;
 	}
 	/*
 	 * We are done if there is no pcb
 	 */
 	if (n == 0) {
-		lck_rw_done(ripcbinfo.ipi_lock);
+		lck_rw_done(&ripcbinfo.ipi_lock);
 		return 0;
 	}
 
-	inp_list = _MALLOC(n * sizeof *inp_list, M_TEMP, M_WAITOK);
-	if (inp_list == 0) {
-		lck_rw_done(ripcbinfo.ipi_lock);
+	inp_list = kalloc_type(struct inpcb *, n, Z_WAITOK);
+	if (inp_list == NULL) {
+		lck_rw_done(&ripcbinfo.ipi_lock);
 		return ENOMEM;
 	}
 
@@ -1329,8 +1266,9 @@ rip_pcblist SYSCTL_HANDLER_ARGS
 		xig.xig_count = ripcbinfo.ipi_count;
 		error = SYSCTL_OUT(req, &xig, sizeof xig);
 	}
-	FREE(inp_list, M_TEMP);
-	lck_rw_done(ripcbinfo.ipi_lock);
+
+	lck_rw_done(&ripcbinfo.ipi_lock);
+	kfree_type(struct inpcb *, sz, inp_list);
 	return error;
 }
 
@@ -1338,13 +1276,13 @@ SYSCTL_PROC(_net_inet_raw, OID_AUTO /*XXX*/, pcblist,
     CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0,
     rip_pcblist, "S,xinpcb", "List of active raw IP sockets");
 
-#if !CONFIG_EMBEDDED
+#if XNU_TARGET_OS_OSX
 
 static int
 rip_pcblist64 SYSCTL_HANDLER_ARGS
 {
 #pragma unused(oidp, arg1, arg2)
-	int error, i, n;
+	int error, i, n, sz;
 	struct inpcb *inp, **inp_list;
 	inp_gen_t gencnt;
 	struct xinpgen xig;
@@ -1353,17 +1291,17 @@ rip_pcblist64 SYSCTL_HANDLER_ARGS
 	 * The process of preparing the TCB list is too time-consuming and
 	 * resource-intensive to repeat twice on every request.
 	 */
-	lck_rw_lock_exclusive(ripcbinfo.ipi_lock);
+	lck_rw_lock_exclusive(&ripcbinfo.ipi_lock);
 	if (req->oldptr == USER_ADDR_NULL) {
 		n = ripcbinfo.ipi_count;
 		req->oldidx = 2 * (sizeof xig)
 		    + (n + n / 8) * sizeof(struct xinpcb64);
-		lck_rw_done(ripcbinfo.ipi_lock);
+		lck_rw_done(&ripcbinfo.ipi_lock);
 		return 0;
 	}
 
 	if (req->newptr != USER_ADDR_NULL) {
-		lck_rw_done(ripcbinfo.ipi_lock);
+		lck_rw_done(&ripcbinfo.ipi_lock);
 		return EPERM;
 	}
 
@@ -1371,7 +1309,7 @@ rip_pcblist64 SYSCTL_HANDLER_ARGS
 	 * OK, now we're committed to doing something.
 	 */
 	gencnt = ripcbinfo.ipi_gencnt;
-	n = ripcbinfo.ipi_count;
+	sz = n = ripcbinfo.ipi_count;
 
 	bzero(&xig, sizeof(xig));
 	xig.xig_len = sizeof xig;
@@ -1380,20 +1318,20 @@ rip_pcblist64 SYSCTL_HANDLER_ARGS
 	xig.xig_sogen = so_gencnt;
 	error = SYSCTL_OUT(req, &xig, sizeof xig);
 	if (error) {
-		lck_rw_done(ripcbinfo.ipi_lock);
+		lck_rw_done(&ripcbinfo.ipi_lock);
 		return error;
 	}
 	/*
 	 * We are done if there is no pcb
 	 */
 	if (n == 0) {
-		lck_rw_done(ripcbinfo.ipi_lock);
+		lck_rw_done(&ripcbinfo.ipi_lock);
 		return 0;
 	}
 
-	inp_list = _MALLOC(n * sizeof *inp_list, M_TEMP, M_WAITOK);
-	if (inp_list == 0) {
-		lck_rw_done(ripcbinfo.ipi_lock);
+	inp_list = kalloc_type(struct inpcb *, n, Z_WAITOK);
+	if (inp_list == NULL) {
+		lck_rw_done(&ripcbinfo.ipi_lock);
 		return ENOMEM;
 	}
 
@@ -1435,8 +1373,9 @@ rip_pcblist64 SYSCTL_HANDLER_ARGS
 		xig.xig_count = ripcbinfo.ipi_count;
 		error = SYSCTL_OUT(req, &xig, sizeof xig);
 	}
-	FREE(inp_list, M_TEMP);
-	lck_rw_done(ripcbinfo.ipi_lock);
+
+	lck_rw_done(&ripcbinfo.ipi_lock);
+	kfree_type(struct inpcb *, sz, inp_list);
 	return error;
 }
 
@@ -1444,7 +1383,7 @@ SYSCTL_PROC(_net_inet_raw, OID_AUTO, pcblist64,
     CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0,
     rip_pcblist64, "S,xinpcb64", "List of active raw IP sockets");
 
-#endif /* !CONFIG_EMBEDDED */
+#endif /* XNU_TARGET_OS_OSX */
 
 
 static int

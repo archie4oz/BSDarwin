@@ -89,24 +89,16 @@
 #include <netinet/tcp.h>
 #include <netinet/in_tclass.h>
 
-#if INET6
 #include <netinet/ip6.h>
 #include <netinet6/ip6_var.h>
 #include <netinet/icmp6.h>
-#endif
 
 #include <netinet6/ipsec.h>
-#if INET6
 #include <netinet6/ipsec6.h>
-#endif
 #include <netinet6/ah.h>
-#if INET6
 #include <netinet6/ah6.h>
-#endif
 #include <netinet6/esp.h>
-#if INET6
 #include <netinet6/esp6.h>
-#endif
 #include <netkey/key.h>
 #include <netkey/keydb.h>
 
@@ -124,8 +116,6 @@ static int esp_output(struct mbuf *, u_char *, struct mbuf *,
 extern int      esp_udp_encap_port;
 extern u_int64_t natt_now;
 
-extern lck_mtx_t *sadb_mutex;
-
 /*
  * compute ESP header size.
  */
@@ -135,7 +125,7 @@ esp_hdrsiz(__unused struct ipsecrequest *isr)
 #if 0
 	/* sanity check */
 	if (isr == NULL) {
-		panic("esp_hdrsiz: NULL was passed.\n");
+		panic("esp_hdrsiz: NULL was passed.");
 	}
 
 
@@ -257,7 +247,7 @@ esp_output(
 	struct tcphdr th = {};
 	u_int32_t spi;
 	u_int32_t seq;
-	u_int32_t inner_payload_len = 0;
+	size_t inner_payload_len = 0;
 	u_int8_t inner_protocol = 0;
 	u_int8_t nxt = 0;
 	size_t plen;    /*payload length to be encrypted*/
@@ -274,18 +264,14 @@ esp_output(
 
 	KERNEL_DEBUG(DBG_FNC_ESPOUT | DBG_FUNC_START, sav->ivlen, 0, 0, 0, 0);
 	switch (af) {
-#if INET
 	case AF_INET:
 		afnumber = 4;
 		stat = &ipsecstat;
 		break;
-#endif
-#if INET6
 	case AF_INET6:
 		afnumber = 6;
 		stat = &ipsec6stat;
 		break;
-#endif
 	default:
 		ipseclog((LOG_ERR, "esp_output: unsupported af %d\n", af));
 		KERNEL_DEBUG(DBG_FNC_ESPOUT | DBG_FUNC_END, 1, 0, 0, 0, 0);
@@ -297,22 +283,18 @@ esp_output(
 	    SADB_X_EXT_SA2_SEQ_PER_TRAFFIC_CLASS) {
 		u_int8_t dscp = 0;
 		switch (af) {
-#if INET
 		case AF_INET:
 		{
 			struct ip *ip = mtod(m, struct ip *);
 			dscp = ip->ip_tos >> IPTOS_DSCP_SHIFT;
 			break;
 		}
-#endif /*INET*/
-#if INET6
 		case AF_INET6:
 		{
 			struct ip6_hdr *ip6 = mtod(m, struct ip6_hdr *);
 			dscp = (ntohl(ip6->ip6_flow) & IP6FLOW_DSCP_MASK) >> IP6FLOW_DSCP_SHIFT;
 			break;
 		}
-#endif /*INET6*/
 		default:
 			panic("esp_output: should not reach here");
 		}
@@ -322,7 +304,6 @@ esp_output(
 	/* some sanity check */
 	if ((sav->flags & SADB_X_EXT_OLD) == 0 && sav->replay[traffic_class] == NULL) {
 		switch (af) {
-#if INET
 		case AF_INET:
 		{
 			struct ip *ip;
@@ -336,15 +317,12 @@ esp_output(
 			IPSEC_STAT_INCREMENT(ipsecstat.out_inval);
 			break;
 		}
-#endif /*INET*/
-#if INET6
 		case AF_INET6:
 			ipseclog((LOG_DEBUG, "esp6_output: internal error: "
 			    "sav->replay is null: SPI=%u\n",
 			    (u_int32_t)ntohl(sav->spi)));
 			IPSEC_STAT_INCREMENT(ipsec6stat.out_inval);
 			break;
-#endif /*INET6*/
 		default:
 			panic("esp_output: should not reach here");
 		}
@@ -375,12 +353,8 @@ esp_output(
 		 * chase the header chain.
 		 * XXX sequential number
 		 */
-#if INET
 		struct ip *ip = NULL;
-#endif
-#if INET6
 		struct ip6_hdr *ip6 = NULL;
-#endif
 		size_t esplen; /* sizeof(struct esp/newesp) */
 		size_t hlen = 0; /* ip header len */
 
@@ -414,7 +388,6 @@ esp_output(
 		}
 
 		switch (af) {
-#if INET
 		case AF_INET:
 			ip = mtod(m, struct ip *);
 #ifdef _IP_VHL
@@ -423,13 +396,10 @@ esp_output(
 			hlen = ip->ip_hl << 2;
 #endif
 			break;
-#endif
-#if INET6
 		case AF_INET6:
 			ip6 = mtod(m, struct ip6_hdr *);
 			hlen = sizeof(*ip6);
 			break;
-#endif
 		}
 
 		/* grab info for packet logging */
@@ -459,7 +429,7 @@ esp_output(
 					if (inner_protocol == IPPROTO_TCP) {
 						if ((int)(iphlen + sizeof(th)) <=
 						    (m->m_pkthdr.len - m->m_len)) {
-							m_copydata(md, iphlen, sizeof(th), (u_int8_t *)&th);
+							m_copydata(md, (int)iphlen, sizeof(th), (u_int8_t *)&th);
 						}
 
 						inner_payload_len = m->m_pkthdr.len - m->m_len - iphlen - (th.th_off << 2);
@@ -475,7 +445,7 @@ esp_output(
 					if (inner_protocol == IPPROTO_TCP) {
 						if ((int)(iphlen + sizeof(th)) <=
 						    m->m_pkthdr.len) {
-							m_copydata(m, iphlen, sizeof(th), (u_int8_t *)&th);
+							m_copydata(m, (int)iphlen, sizeof(th), (u_int8_t *)&th);
 						}
 
 						inner_payload_len = m->m_pkthdr.len - iphlen - (th.th_off << 2);
@@ -549,7 +519,8 @@ esp_output(
 				error = ENOBUFS;
 				goto fail;
 			}
-			n->m_len = esphlen;
+			VERIFY(esphlen <= INT32_MAX);
+			n->m_len = (int)esphlen;
 			mprev->m_next = n;
 			n->m_next = md;
 			m->m_pkthdr.len += esphlen;
@@ -573,10 +544,9 @@ esp_output(
 		}
 
 		switch (af) {
-#if INET
 		case AF_INET:
 			if (esphlen < (IP_MAXPACKET - ntohs(ip->ip_len))) {
-				ip->ip_len = htons(ntohs(ip->ip_len) + esphlen);
+				ip->ip_len = htons(ntohs(ip->ip_len) + (u_short)esphlen);
 			} else {
 				ipseclog((LOG_ERR,
 				    "IPv4 ESP output: size exceeds limit\n"));
@@ -586,12 +556,9 @@ esp_output(
 				goto fail;
 			}
 			break;
-#endif
-#if INET6
 		case AF_INET6:
 			/* total packet length will be computed in ip6_output() */
 			break;
-#endif
 		}
 	}
 
@@ -600,7 +567,7 @@ esp_output(
 	if ((sav->flags & SADB_X_EXT_OLD) == 0) {
 		struct newesp *nesp;
 		nesp = (struct newesp *)esp;
-		if (sav->replay[traffic_class]->count == sav->replay[traffic_class]->lastseq) {
+		if (sav->replay[traffic_class]->seq == sav->replay[traffic_class]->lastseq) {
 			if ((sav->flags & SADB_X_EXT_CYCSEQ) == 0) {
 				/* XXX Is it noisy ? */
 				ipseclog((LOG_WARNING,
@@ -614,22 +581,21 @@ esp_output(
 		}
 		lck_mtx_lock(sadb_mutex);
 		sav->replay[traffic_class]->count++;
+		sav->replay[traffic_class]->seq++;
 		lck_mtx_unlock(sadb_mutex);
 		/*
 		 * XXX sequence number must not be cycled, if the SA is
 		 * installed by IKE daemon.
 		 */
-		nesp->esp_seq = htonl(sav->replay[traffic_class]->count);
-		seq = sav->replay[traffic_class]->count;
+		nesp->esp_seq = htonl(sav->replay[traffic_class]->seq);
+		seq = sav->replay[traffic_class]->seq;
 	}
 
 	{
 		/*
 		 * find the last mbuf. make some room for ESP trailer.
 		 */
-#if INET
 		struct ip *ip = NULL;
-#endif
 		size_t padbound;
 		u_char *extend;
 		int i;
@@ -652,16 +618,12 @@ esp_output(
 
 		/* random padding */
 		switch (af) {
-#if INET
 		case AF_INET:
 			randpadmax = ip4_esp_randpad;
 			break;
-#endif
-#if INET6
 		case AF_INET6:
 			randpadmax = ip6_esp_randpad;
 			break;
-#endif
 		default:
 			randpadmax = -1;
 			break;
@@ -669,10 +631,10 @@ esp_output(
 		if (randpadmax < 0 || plen + extendsiz >= randpadmax) {
 			;
 		} else {
-			int pad;
+			size_t pad;
 
 			/* round */
-			randpadmax = (randpadmax / padbound) * padbound;
+			randpadmax = (int)((randpadmax / padbound) * padbound);
 			pad = (randpadmax - plen + extendsiz) / padbound;
 
 			if (pad > 0) {
@@ -695,12 +657,6 @@ esp_output(
 			}
 		}
 
-#if DIAGNOSTIC
-		if (extendsiz > MLEN || extendsiz >= 256) {
-			panic("extendsiz too big in esp_output");
-		}
-#endif
-
 		n = m;
 		while (n->m_next) {
 			n = n->m_next;
@@ -713,7 +669,7 @@ esp_output(
 		 */
 		if (!(n->m_flags & M_EXT) && extendsiz < M_TRAILINGSPACE(n)) {
 			extend = mtod(n, u_char *) + n->m_len;
-			n->m_len += extendsiz;
+			n->m_len += (int)extendsiz;
 			m->m_pkthdr.len += extendsiz;
 		} else {
 			struct mbuf *nn;
@@ -727,7 +683,8 @@ esp_output(
 				goto fail;
 			}
 			extend = mtod(nn, u_char *);
-			nn->m_len = extendsiz;
+			VERIFY(extendsiz <= INT_MAX);
+			nn->m_len = (int)extendsiz;
 			nn->m_next = NULL;
 			n->m_next = nn;
 			n = nn;
@@ -771,15 +728,15 @@ esp_output(
 		esptail = (struct esptail *)
 		    (mtod(n, u_int8_t *) + n->m_len - sizeof(struct esptail));
 		esptail->esp_nxt = nxt;
-		esptail->esp_padlen = extendsiz - 2;
+		VERIFY((extendsiz - 2) <= UINT8_MAX);
+		esptail->esp_padlen = (u_int8_t)(extendsiz - 2);
 
 		/* modify IP header (for ESP header part only) */
 		switch (af) {
-#if INET
 		case AF_INET:
 			ip = mtod(m, struct ip *);
 			if (extendsiz < (IP_MAXPACKET - ntohs(ip->ip_len))) {
-				ip->ip_len = htons(ntohs(ip->ip_len) + extendsiz);
+				ip->ip_len = htons(ntohs(ip->ip_len) + (u_short)extendsiz);
 			} else {
 				ipseclog((LOG_ERR,
 				    "IPv4 ESP output: size exceeds limit\n"));
@@ -789,12 +746,9 @@ esp_output(
 				goto fail;
 			}
 			break;
-#endif
-#if INET6
 		case AF_INET6:
 			/* total packet length will be computed in ip6_output() */
 			break;
-#endif
 		}
 	}
 
@@ -900,7 +854,7 @@ fill_icv:
 				error = ENOBUFS;
 				goto fail;
 			}
-			nn->m_len = siz;
+			nn->m_len = (int)siz;
 			nn->m_next = NULL;
 			n->m_next = nn;
 			n = nn;
@@ -911,11 +865,10 @@ fill_icv:
 
 		/* modify IP header (for ESP header part only) */
 		switch (af) {
-	#if INET
 		case AF_INET:
 			ip = mtod(m, struct ip *);
 			if (siz < (IP_MAXPACKET - ntohs(ip->ip_len))) {
-				ip->ip_len = htons(ntohs(ip->ip_len) + siz);
+				ip->ip_len = htons(ntohs(ip->ip_len) + (u_short)siz);
 			} else {
 				ipseclog((LOG_ERR,
 				    "IPv4 ESP output: size exceeds limit\n"));
@@ -925,12 +878,9 @@ fill_icv:
 				goto fail;
 			}
 			break;
-	#endif
-	#if INET6
 		case AF_INET6:
 			/* total packet length will be computed in ip6_output() */
 			break;
-	#endif
 		}
 	}
 
@@ -941,11 +891,12 @@ fill_icv:
 		switch (af) {
 		case AF_INET:
 			ip = mtod(m, struct ip *);
-			udp->uh_ulen = htons(ntohs(ip->ip_len) - (IP_VHL_HL(ip->ip_vhl) << 2));
+			udp->uh_ulen = htons((u_int16_t)(ntohs(ip->ip_len) - (IP_VHL_HL(ip->ip_vhl) << 2)));
 			break;
 		case AF_INET6:
 			ip6 = mtod(m, struct ip6_hdr *);
-			udp->uh_ulen = htons(plen + siz + extendsiz + esphlen);
+			VERIFY((plen + siz + extendsiz + esphlen) <= UINT16_MAX);
+			udp->uh_ulen = htons((u_int16_t)(plen + siz + extendsiz + esphlen));
 			udp->uh_sum = in6_pseudo(&ip6->ip6_src, &ip6->ip6_dst, htonl(ntohs(udp->uh_ulen) + IPPROTO_UDP));
 			m->m_pkthdr.csum_flags = (CSUM_UDPIPV6 | CSUM_ZERO_INVERT);
 			m->m_pkthdr.csum_data = offsetof(struct udphdr, uh_sum);
@@ -962,7 +913,7 @@ noantireplay:
 		    ntohl(spi), seq,
 		    ntohs(th.th_sport), ntohs(th.th_dport),
 		    ntohl(th.th_seq), ntohl(th.th_ack),
-		    th.th_flags, inner_payload_len);
+		    inner_payload_len, th.th_flags);
 	}
 
 	lck_mtx_lock(sadb_mutex);
@@ -979,15 +930,10 @@ noantireplay:
 	return 0;
 
 fail:
-#if 1
 	KERNEL_DEBUG(DBG_FNC_ESPOUT | DBG_FUNC_END, 7, error, 0, 0, 0);
 	return error;
-#else
-	panic("something bad in esp_output");
-#endif
 }
 
-#if INET
 int
 esp4_output(
 	struct mbuf *m,
@@ -1003,9 +949,7 @@ esp4_output(
 	/* XXX assumes that m->m_next points to payload */
 	return esp_output(m, &ip->ip_p, m->m_next, AF_INET, sav);
 }
-#endif /*INET*/
 
-#if INET6
 int
 esp6_output(
 	struct mbuf *m,
@@ -1020,4 +964,3 @@ esp6_output(
 	}
 	return esp_output(m, nexthdrp, md, AF_INET6, sav);
 }
-#endif /*INET6*/

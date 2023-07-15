@@ -73,6 +73,8 @@
 #include <Availability.h>
 #endif /* KERNEL */
 
+#ifndef DRIVERKIT
+
 /*
  * [XSI] The fd_set type shall be defined as described in <sys/select.h>.
  * The timespec structure shall be defined as described in <time.h>
@@ -136,6 +138,12 @@ struct  itimerval {
 	(ts)->tv_sec = (tv)->tv_sec;                                    \
 	(ts)->tv_nsec = (tv)->tv_usec * 1000;                           \
 }
+#ifdef KERNEL
+#define TIMEVAL64_TO_TIMESPEC(tv, ts){                                                                  \
+	(ts)->tv_sec = (time_t)((tv)->tv_sec);                                          \
+	(ts)->tv_nsec = (tv)->tv_usec * 1000;                                           \
+}
+#endif
 #define TIMESPEC_TO_TIMEVAL(tv, ts) {                                   \
 	(tv)->tv_sec = (ts)->tv_sec;                                    \
 	(tv)->tv_usec = (ts)->tv_nsec / 1000;                           \
@@ -252,5 +260,9 @@ int     utimes(const char *, const struct timeval *);
 __END_DECLS
 
 #endif /* !KERNEL */
+
+#else /* !DRIVERKIT */
+#include <sys/_types/_time_t.h>
+#endif /* DRIVERKIT */
 
 #endif /* !_SYS_TIME_H_ */

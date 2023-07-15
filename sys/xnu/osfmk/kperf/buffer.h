@@ -80,6 +80,7 @@
 #define PERF_TI_SCHEDDATA2_32_2 PERF_TI_CODE(20)
 #define PERF_TI_SCHEDDATA3_32   PERF_TI_CODE(21)
 #define PERF_TI_SCHEDDATA_3     PERF_TI_CODE(22)
+#define PERF_TI_DISPLABEL       PERF_TI_CODE(23)
 
 #define PERF_CS_CODE(code) PERF_CODE(PERF_CALLSTACK, code)
 #define PERF_CS_KSAMPLE    PERF_CS_CODE(0)
@@ -150,6 +151,7 @@
 #define PERF_MI_DATA       PERF_MI_CODE(1)
 #define PERF_MI_SYS_DATA   PERF_MI_CODE(2)
 #define PERF_MI_SYS_DATA_2 PERF_MI_CODE(3)
+#define PERF_MI_SYS_DATA_3 PERF_MI_CODE(4)
 
 /* error sub-codes for trace data */
 enum{
@@ -169,15 +171,7 @@ extern int kperf_debug_level;
 
 /* BUF_DATA tracepoints are for logging actual kperf results. */
 
-#define BUF_DATA_INT(EVENTID, A0, A1, A2, A3) KERNEL_DEBUG_CONSTANT_IST(~KDEBUG_ENABLE_PPT, EVENTID, A0, A1, A2, A3, 0)
-
-#define BUF_DATA(EVENTID, ...)                          BUF_DATA_(EVENTID, ## __VA_ARGS__, 4, 3, 2, 1, 0)
-#define BUF_DATA_(EVENTID, A1, A2, A3, A4, N_ARGS, ...) BUF_DATA##N_ARGS(EVENTID, A1, A2, A3, A4)
-#define BUF_DATA0(EVENTID, A1, A2, A3, A4)              BUF_DATA_INT(EVENTID, 0, 0, 0, 0)
-#define BUF_DATA1(EVENTID, A1, A2, A3, A4)              BUF_DATA_INT(EVENTID, A1, 0, 0, 0)
-#define BUF_DATA2(EVENTID, A1, A2, A3, A4)              BUF_DATA_INT(EVENTID, A1, A2, 0, 0)
-#define BUF_DATA3(EVENTID, A1, A2, A3, A4)              BUF_DATA_INT(EVENTID, A1, A2, A3, 0)
-#define BUF_DATA4(EVENTID, A1, A2, A3, A4)              BUF_DATA_INT(EVENTID, A1, A2, A3, A4)
+#define BUF_DATA(EVENTID, ...) KDBG_RELEASE(EVENTID, ## __VA_ARGS__)
 
 /*
  * BUF_INFO tracepoints are for logging debugging information relevant to

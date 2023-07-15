@@ -34,7 +34,11 @@
 
 #include <stdint.h>
 
+#if KERNEL
 #include <IOKit/IOReportTypes.h>
+#else
+#include <DriverKit/IOReportTypes.h>
+#endif
 
 #ifdef __cplusplus
 extern "C" {

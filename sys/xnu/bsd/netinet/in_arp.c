@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2004-2017 Apple Inc. All rights reserved.
+ * Copyright (c) 2004-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -157,7 +157,7 @@ static errno_t arp_lookup_route(const struct in_addr *, int,
     int, route_t *, unsigned int);
 static int arp_getstat SYSCTL_HANDLER_ARGS;
 
-static struct llinfo_arp *arp_llinfo_alloc(int);
+static struct llinfo_arp *arp_llinfo_alloc(zalloc_flags_t);
 static void arp_llinfo_free(void *);
 static uint32_t arp_llinfo_flushq(struct llinfo_arp *);
 static void arp_llinfo_purge(struct rtentry *);
@@ -262,9 +262,7 @@ SYSCTL_PROC(_net_link_ether_inet, OID_AUTO, stats,
     0, 0, arp_getstat, "S,arpstat",
     "ARP statistics (struct arpstat, net/if_arp.h)");
 
-static struct zone *llinfo_arp_zone;
-#define LLINFO_ARP_ZONE_MAX     256             /* maximum elements in zone */
-#define LLINFO_ARP_ZONE_NAME    "llinfo_arp"    /* name for zone */
+static KALLOC_TYPE_DEFINE(llinfo_arp_zone, struct llinfo_arp, NET_KT_DEFAULT);
 
 void
 arp_init(void)
@@ -273,28 +271,15 @@ arp_init(void)
 
 	LIST_INIT(&llinfo_arp);
 
-	llinfo_arp_zone = zinit(sizeof(struct llinfo_arp),
-	    LLINFO_ARP_ZONE_MAX * sizeof(struct llinfo_arp), 0,
-	    LLINFO_ARP_ZONE_NAME);
-	if (llinfo_arp_zone == NULL) {
-		panic("%s: failed allocating llinfo_arp_zone", __func__);
-	}
-
-	zone_change(llinfo_arp_zone, Z_EXPAND, TRUE);
-	zone_change(llinfo_arp_zone, Z_CALLERACCT, FALSE);
-
 	arpinit_done = 1;
 }
 
 static struct llinfo_arp *
-arp_llinfo_alloc(int how)
+arp_llinfo_alloc(zalloc_flags_t how)
 {
-	struct llinfo_arp *la;
+	struct llinfo_arp *la = zalloc_flags(llinfo_arp_zone, how | Z_ZERO);
 
-	la = (how == M_WAITOK) ? zalloc(llinfo_arp_zone) :
-	    zalloc_noblock(llinfo_arp_zone);
-	if (la != NULL) {
-		bzero(la, sizeof(*la));
+	if (la) {
 		/*
 		 * The type of queue (Q_DROPHEAD) here is just a hint;
 		 * the actual logic that works on this queue performs
@@ -303,7 +288,6 @@ arp_llinfo_alloc(int how)
 		_qinit(&la->la_holdq, Q_DROPHEAD, (arp_maxhold == 0) ?
 		    (uint32_t)-1 : arp_maxhold, QP_MBUF);
 	}
-
 	return la;
 }
 
@@ -963,13 +947,15 @@ arp_rtrequest(int req, struct rtentry *rt, struct sockaddr *sa)
 			if (la != NULL) {
 				arp_llreach_use(la); /* Mark use timestamp */
 			}
-			RT_UNLOCK(rt);
-			dlil_send_arp(rt->rt_ifp, ARPOP_REQUEST,
-			    SDL(gate), rt_key(rt), NULL, rt_key(rt), 0);
-			RT_LOCK(rt);
-			arpstat.txannounces++;
+			if ((rt->rt_ifp->if_flags & IFF_NOARP) == 0) {
+				RT_UNLOCK(rt);
+				dlil_send_arp(rt->rt_ifp, ARPOP_REQUEST,
+				    SDL(gate), rt_key(rt), NULL, rt_key(rt), 0);
+				RT_LOCK(rt);
+				arpstat.txannounces++;
+			}
 		}
-	/* FALLTHRU */
+		OS_FALLTHROUGH;
 	case RTM_RESOLVE:
 		if (gate->sa_family != AF_LINK ||
 		    gate->sa_len < sizeof(null_sdl)) {
@@ -992,11 +978,8 @@ arp_rtrequest(int req, struct rtentry *rt, struct sockaddr *sa)
 		 * Case 2:  This route may come from cloning, or a manual route
 		 * add with a LL address.
 		 */
-		rt->rt_llinfo = la = arp_llinfo_alloc(M_WAITOK);
-		if (la == NULL) {
-			arpstat.reqnobufs++;
-			break;
-		}
+		rt->rt_llinfo = la = arp_llinfo_alloc(Z_WAITOK);
+
 		rt->rt_llinfo_get_ri    = arp_llinfo_get_ri;
 		rt->rt_llinfo_get_iflri = arp_llinfo_get_iflri;
 		rt->rt_llinfo_purge     = arp_llinfo_purge;
@@ -1027,12 +1010,14 @@ arp_rtrequest(int req, struct rtentry *rt, struct sockaddr *sa)
 		    rt->rt_ifp)) {
 			struct sockaddr_dl *gate_ll = SDL(gate);
 			size_t broadcast_len;
-			ifnet_llbroadcast_copy_bytes(rt->rt_ifp,
+			int ret = ifnet_llbroadcast_copy_bytes(rt->rt_ifp,
 			    LLADDR(gate_ll), sizeof(gate_ll->sdl_data),
 			    &broadcast_len);
-			gate_ll->sdl_alen = broadcast_len;
-			gate_ll->sdl_family = AF_LINK;
-			gate_ll->sdl_len = sizeof(struct sockaddr_dl);
+			if (ret == 0 && broadcast_len <= UINT8_MAX) {
+				gate_ll->sdl_alen = (u_char)broadcast_len;
+				gate_ll->sdl_family = AF_LINK;
+				gate_ll->sdl_len = sizeof(struct sockaddr_dl);
+			}
 			/* In case we're called before 1.0 sec. has elapsed */
 			rt_setexpire(rt, MAX(timenow, 1));
 		} else if (IN_LINKLOCAL(ntohl(SIN(rt_key(rt))->
@@ -1249,6 +1234,53 @@ arp_is_entry_probing(route_t p_route)
 	return FALSE;
 }
 
+__attribute__((noinline))
+static void
+post_kev_in_arpfailure(struct ifnet *ifp)
+{
+	struct kev_msg ev_msg = {};
+	struct kev_in_arpfailure in_arpfailure = {};
+
+	in_arpfailure.link_data.if_family = ifp->if_family;
+	in_arpfailure.link_data.if_unit = ifp->if_unit;
+	strlcpy(in_arpfailure.link_data.if_name, ifp->if_name, IFNAMSIZ);
+	ev_msg.vendor_code = KEV_VENDOR_APPLE;
+	ev_msg.kev_class = KEV_NETWORK_CLASS;
+	ev_msg.kev_subclass = KEV_INET_SUBCLASS;
+	ev_msg.event_code = KEV_INET_ARPRTRFAILURE;
+	ev_msg.dv[0].data_ptr = &in_arpfailure;
+	ev_msg.dv[0].data_length = sizeof(struct kev_in_arpfailure);
+	dlil_post_complete_msg(NULL, &ev_msg);
+}
+
+__attribute__((noinline))
+static void
+arp_send_probe_notification(route_t route)
+{
+	route_event_enqueue_nwk_wq_entry(route, NULL,
+	    ROUTE_LLENTRY_PROBED, NULL, TRUE);
+
+	if (route->rt_flags & RTF_ROUTER) {
+		struct radix_node_head  *rnh = NULL;
+		struct route_event rt_ev;
+		route_event_init(&rt_ev, route, NULL, ROUTE_LLENTRY_PROBED);
+		/*
+		 * We already have a reference on rt. The function
+		 * frees it before returning.
+		 */
+		RT_UNLOCK(route);
+		lck_mtx_lock(rnh_lock);
+		rnh = rt_tables[AF_INET];
+
+		if (rnh != NULL) {
+			(void) rnh->rnh_walktree(rnh,
+			    route_event_walktree, (void *)&rt_ev);
+		}
+		lck_mtx_unlock(rnh_lock);
+		RT_LOCK(route);
+	}
+}
+
 /*
  * This is the ARP pre-output routine; care must be taken to ensure that
  * the "hint" route never gets freed via rtfree(), since the caller may
@@ -1270,7 +1302,7 @@ arp_lookup_ip(ifnet_t ifp, const struct sockaddr_in *net_dest,
 	struct ifaddr *rt_ifa;
 	struct sockaddr *sa;
 	uint32_t rtflags;
-	struct sockaddr_dl sdl;
+	struct sockaddr_dl sdl = {};
 	boolean_t send_probe_notif = FALSE;
 	boolean_t enqueued = FALSE;
 
@@ -1311,8 +1343,8 @@ arp_lookup_ip(ifnet_t ifp, const struct sockaddr_in *net_dest,
 		result = ifnet_llbroadcast_copy_bytes(ifp, LLADDR(ll_dest),
 		    ll_dest_len - offsetof(struct sockaddr_dl, sdl_data),
 		    &broadcast_len);
-		if (result == 0) {
-			ll_dest->sdl_alen = broadcast_len;
+		if (result == 0 && broadcast_len <= UINT8_MAX) {
+			ll_dest->sdl_alen = (u_char)broadcast_len;
 			ll_dest->sdl_family = AF_LINK;
 			ll_dest->sdl_len = sizeof(struct sockaddr_dl);
 		}
@@ -1372,6 +1404,11 @@ arp_lookup_ip(ifnet_t ifp, const struct sockaddr_in *net_dest,
 			    __func__, inet_ntop(AF_INET, &net_dest->sin_addr,
 			    tmp, sizeof(tmp)));
 		}
+		goto release;
+	}
+
+	if ((ifp->if_flags & IFF_NOARP) != 0) {
+		result = ENOTSUP;
 		goto release;
 	}
 
@@ -1464,11 +1501,6 @@ arp_lookup_ip(ifnet_t ifp, const struct sockaddr_in *net_dest,
 		}
 	}
 
-	if (ifp->if_flags & IFF_NOARP) {
-		result = ENOTSUP;
-		goto release;
-	}
-
 	/*
 	 * Route wasn't complete/valid; we need to send out ARP request.
 	 * If we've exceeded the limit of la_holdq, drop from the head
@@ -1500,8 +1532,6 @@ arp_lookup_ip(ifnet_t ifp, const struct sockaddr_in *net_dest,
 		if (llinfo->la_asked == 0 || route->rt_expire != timenow) {
 			rt_setexpire(route, timenow);
 			if (llinfo->la_asked++ < llinfo->la_maxtries) {
-				struct kev_msg ev_msg;
-				struct kev_in_arpfailure in_arpfailure;
 				boolean_t sendkev = FALSE;
 
 				rt_ifa = route->rt_ifa;
@@ -1532,29 +1562,10 @@ arp_lookup_ip(ifnet_t ifp, const struct sockaddr_in *net_dest,
 				    rtflags);
 				IFA_REMREF(rt_ifa);
 				if (sendkev) {
-					bzero(&ev_msg, sizeof(ev_msg));
-					bzero(&in_arpfailure,
-					    sizeof(in_arpfailure));
-					in_arpfailure.link_data.if_family =
-					    ifp->if_family;
-					in_arpfailure.link_data.if_unit =
-					    ifp->if_unit;
-					strlcpy(in_arpfailure.link_data.if_name,
-					    ifp->if_name, IFNAMSIZ);
-					ev_msg.vendor_code = KEV_VENDOR_APPLE;
-					ev_msg.kev_class = KEV_NETWORK_CLASS;
-					ev_msg.kev_subclass = KEV_INET_SUBCLASS;
-					ev_msg.event_code =
-					    KEV_INET_ARPRTRFAILURE;
-					ev_msg.dv[0].data_ptr = &in_arpfailure;
-					ev_msg.dv[0].data_length =
-					    sizeof(struct
-					    kev_in_arpfailure);
-					dlil_post_complete_msg(NULL, &ev_msg);
+					post_kev_in_arpfailure(ifp);
 				}
-				result = EJUSTRETURN;
 				RT_LOCK(route);
-				goto release;
+				goto release_just_return;
 			} else {
 				route->rt_flags |= RTF_REJECT;
 				rt_setexpire(route,
@@ -1587,10 +1598,12 @@ arp_lookup_ip(ifnet_t ifp, const struct sockaddr_in *net_dest,
 		}
 	}
 
+
+release_just_return:
 	/* The packet is now held inside la_holdq or dropped */
 	result = EJUSTRETURN;
 	if (packet != NULL && !enqueued) {
-		mbuf_free(packet);
+		m_freem(packet);
 		packet = NULL;
 	}
 
@@ -1601,28 +1614,7 @@ release:
 
 	if (route != NULL) {
 		if (send_probe_notif) {
-			route_event_enqueue_nwk_wq_entry(route, NULL,
-			    ROUTE_LLENTRY_PROBED, NULL, TRUE);
-
-			if (route->rt_flags & RTF_ROUTER) {
-				struct radix_node_head  *rnh = NULL;
-				struct route_event rt_ev;
-				route_event_init(&rt_ev, route, NULL, ROUTE_LLENTRY_PROBED);
-				/*
-				 * We already have a reference on rt. The function
-				 * frees it before returning.
-				 */
-				RT_UNLOCK(route);
-				lck_mtx_lock(rnh_lock);
-				rnh = rt_tables[AF_INET];
-
-				if (rnh != NULL) {
-					(void) rnh->rnh_walktree(rnh,
-					    route_event_walktree, (void *)&rt_ev);
-				}
-				lck_mtx_unlock(rnh_lock);
-				RT_LOCK(route);
-			}
+			arp_send_probe_notification(route);
 		}
 
 		if (route == hint) {
@@ -1648,7 +1640,7 @@ arp_ip_handle_input(ifnet_t ifp, u_short arpop,
     const struct sockaddr_in *target_ip)
 {
 	char ipv4str[MAX_IPv4_STR_LEN];
-	struct sockaddr_dl proxied;
+	struct sockaddr_dl proxied = {};
 	struct sockaddr_dl *gateway, *target_hw = NULL;
 	struct ifaddr *ifa;
 	struct in_ifaddr *ia;
@@ -1688,7 +1680,7 @@ arp_ip_handle_input(ifnet_t ifp, u_short arpop,
 	/*
 	 * Determine if this ARP is for us
 	 */
-	lck_rw_lock_shared(in_ifaddr_rwlock);
+	lck_rw_lock_shared(&in_ifaddr_rwlock);
 	TAILQ_FOREACH(ia, INADDR_HASH(target_ip->sin_addr.s_addr), ia_hash) {
 		IFA_LOCK_SPIN(&ia->ia_ifa);
 		if (ia->ia_ifp == ifp &&
@@ -1697,7 +1689,7 @@ arp_ip_handle_input(ifnet_t ifp, u_short arpop,
 			best_ia_sin = best_ia->ia_addr;
 			IFA_ADDREF_LOCKED(&ia->ia_ifa);
 			IFA_UNLOCK(&ia->ia_ifa);
-			lck_rw_done(in_ifaddr_rwlock);
+			lck_rw_done(&in_ifaddr_rwlock);
 			goto match;
 		}
 		IFA_UNLOCK(&ia->ia_ifa);
@@ -1711,7 +1703,7 @@ arp_ip_handle_input(ifnet_t ifp, u_short arpop,
 			best_ia_sin = best_ia->ia_addr;
 			IFA_ADDREF_LOCKED(&ia->ia_ifa);
 			IFA_UNLOCK(&ia->ia_ifa);
-			lck_rw_done(in_ifaddr_rwlock);
+			lck_rw_done(&in_ifaddr_rwlock);
 			goto match;
 		}
 		IFA_UNLOCK(&ia->ia_ifa);
@@ -1738,14 +1730,14 @@ arp_ip_handle_input(ifnet_t ifp, u_short arpop,
 				best_ia_sin = best_ia->ia_addr;
 				IFA_ADDREF_LOCKED(&ia->ia_ifa);
 				IFA_UNLOCK(&ia->ia_ifa);
-				lck_rw_done(in_ifaddr_rwlock);
+				lck_rw_done(&in_ifaddr_rwlock);
 				goto match;
 			}
 			IFA_UNLOCK(&ia->ia_ifa);
 		}
 	}
 #undef BDG_MEMBER_MATCHES_ARP
-	lck_rw_done(in_ifaddr_rwlock);
+	lck_rw_done(&in_ifaddr_rwlock);
 
 	/*
 	 * No match, use the first inet address on the receive interface
@@ -1797,7 +1789,7 @@ match:
 		    "address %s\n", if_name(ifp),
 		    inet_ntop(AF_INET, &sender_ip->sin_addr, ipv4str,
 		    sizeof(ipv4str)), sdl_addr_to_hex(sender_hw, buf,
-		    sizeof(buf)));
+		    (int)sizeof(buf)));
 
 		/* Send a kernel event so anyone can learn of the conflict */
 		in_collision->link_data.if_family = ifp->if_family;
@@ -1883,7 +1875,7 @@ match:
 					log(LOG_INFO, "arp: %s on %s sent "
 					    "probe for %s, already on %s\n",
 					    sdl_addr_to_hex(sender_hw, buf,
-					    sizeof(buf)), if_name(ifp),
+					    (int)sizeof(buf)), if_name(ifp),
 					    inet_ntop(AF_INET,
 					    &target_ip->sin_addr, ipv4str,
 					    sizeof(ipv4str)),
@@ -1891,7 +1883,7 @@ match:
 					log(LOG_INFO, "arp: sending "
 					    "conflicting probe to %s on %s\n",
 					    sdl_addr_to_hex(sender_hw, buf,
-					    sizeof(buf)), if_name(ifp));
+					    (int)sizeof(buf)), if_name(ifp));
 				}
 				/* Mark use timestamp */
 				if (route->rt_llinfo != NULL) {
@@ -1978,7 +1970,7 @@ match:
 				    ipv4str, sizeof(ipv4str)),
 				    if_name(route->rt_ifp),
 				    sdl_addr_to_hex(sender_hw, buf,
-				    sizeof(buf)), if_name(ifp));
+				    (int)sizeof(buf)), if_name(ifp));
 			}
 			goto respond;
 		} else {
@@ -2067,15 +2059,15 @@ match:
 			log(LOG_INFO, "arp: %s moved from %s to %s on %s\n",
 			    inet_ntop(AF_INET, &sender_ip->sin_addr, ipv4str,
 			    sizeof(ipv4str)),
-			    sdl_addr_to_hex(gateway, buf, sizeof(buf)),
-			    sdl_addr_to_hex(sender_hw, buf2, sizeof(buf2)),
+			    sdl_addr_to_hex(gateway, buf, (int)sizeof(buf)),
+			    sdl_addr_to_hex(sender_hw, buf2, (int)sizeof(buf2)),
 			    if_name(ifp));
 		} else if (route->rt_expire == 0) {
 			if (arp_verbose || log_arp_warnings) {
 				log(LOG_ERR, "arp: %s attempts to modify "
 				    "permanent entry for %s on %s\n",
 				    sdl_addr_to_hex(sender_hw, buf,
-				    sizeof(buf)),
+				    (int)sizeof(buf)),
 				    inet_ntop(AF_INET, &sender_ip->sin_addr,
 				    ipv4str, sizeof(ipv4str)),
 				    if_name(ifp));
@@ -2278,7 +2270,9 @@ arp_ifinit(struct ifnet *ifp, struct ifaddr *ifa)
 	ifa->ifa_flags |= RTF_CLONING;
 	sa = ifa->ifa_addr;
 	IFA_UNLOCK(ifa);
-	dlil_send_arp(ifp, ARPOP_REQUEST, NULL, sa, NULL, sa, 0);
+	if ((ifp->if_flags & IFF_NOARP) == 0) {
+		dlil_send_arp(ifp, ARPOP_REQUEST, NULL, sa, NULL, sa, 0);
+	}
 }
 
 static int

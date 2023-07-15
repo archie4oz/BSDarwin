@@ -1,13 +1,16 @@
 #include <darwintest.h>
 #include <darwintest_utils.h>
 #include <dispatch/dispatch.h>
-#include <net/pfkeyv2.h>
+#include <net/if_var_private.h>
+#include <System/net/pfkeyv2.h>
 #include <netinet6/ipsec.h>
 #include <arpa/inet.h>
 
 T_GLOBAL_META(
 	T_META_NAMESPACE("xnu.pfkey"),
 	T_META_ASROOT(true),
+	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("NetworkExtension"),
 	T_META_CHECK_LEAKS(false));
 
 #define MAX_SPD_CHECK       100
@@ -33,6 +36,8 @@ typedef enum {
 	TEST_SADB_EXT_MIGRATE_ADDRESS_IPv4 = 9,
 	TEST_SADB_EXT_MIGRATE_ADDRESS_IPv6 = 10,
 	TEST_SADB_EXT_MIGRATE_BAD_ADDRESS = 11,
+	TEST_TCP_INPUT_IPSEC_COPY_POLICY = 12,
+	TEST_SADB_X_SPDADD_MEMORY_LEAK_78944570 = 13,
 } test_identifier;
 
 static test_identifier test_id = TEST_INVALID;
@@ -51,6 +56,7 @@ static void pfkey_process_message_test_60822823_1(uint8_t **mhp, int pfkey_socke
 static void pfkey_process_message_test_60687183(uint8_t **mhp, int pfkey_socket);
 static void pfkey_process_message_test_60687183_1(uint8_t **mhp, int pfkey_socket);
 static void pfkey_process_message_test_60687183_2(uint8_t **mhp, int pfkey_socket);
+static void pfkey_process_message_test_78944570(uint8_t **mhp, int pfkey_socket);
 
 static void(*const process_pfkey_message_tests[])(uint8_t * *mhp, int pfkey_socket) =
 {
@@ -66,6 +72,8 @@ static void(*const process_pfkey_message_tests[])(uint8_t * *mhp, int pfkey_sock
 	pfkey_process_message_test_60687183,    // TEST_SADB_EXT_MIGRATE_ADDRESS_IPv4
 	pfkey_process_message_test_60687183_1,  // TEST_SADB_EXT_MIGRATE_ADDRESS_IPv6
 	pfkey_process_message_test_60687183_2,  // TEST_SADB_EXT_MIGRATE_BAD_ADDRESS
+	NULL,                                   // TEST_TCP_INPUT_IPSEC_COPY_POLICY
+	pfkey_process_message_test_78944570,    // TEST_SADB_X_SPDADD_MEMORY_LEAK_78944570
 };
 
 static void
@@ -255,7 +263,11 @@ send_pfkey_spd_add_message(int pfkey_socket, uint8_t proto)
 	policy_payload->sadb_x_policy_len = PFKEY_UNIT64(sizeof(*policy_payload));
 	policy_payload->sadb_x_policy_exttype = SADB_X_EXT_POLICY;
 	policy_payload->sadb_x_policy_type = IPSEC_POLICY_DISCARD;
-	policy_payload->sadb_x_policy_dir = IPSEC_DIR_OUTBOUND;
+	if (test_id == TEST_SADB_X_SPDADD_MEMORY_LEAK_78944570) {
+		policy_payload->sadb_x_policy_dir = IPSEC_DIR_INVALID;
+	} else {
+		policy_payload->sadb_x_policy_dir = IPSEC_DIR_OUTBOUND;
+	}
 	tlen += sizeof(*policy_payload);
 
 	// Update the total length
@@ -1101,7 +1113,7 @@ pfkey_process_message_test_60822136(uint8_t **mhp, int pfkey_socket)
 		T_QUIET; T_ASSERT_NOTNULL(policy_message, "spd add policy message is NULL");
 		policy_id = policy_message->sadb_x_policy_id;
 		T_LOG("Added policy id %u", policy_id);
-		send_pfkey_spd_get_message(pfkey_socket, policy_id);;
+		send_pfkey_spd_get_message(pfkey_socket, policy_id);
 		break;
 	}
 	case SADB_X_SPDGET:
@@ -1171,7 +1183,7 @@ pfkey_process_message_test_60822924(uint8_t **mhp, int pfkey_socket)
 		T_QUIET; T_ASSERT_NOTNULL(policy_message, "spd add policy message is NULL");
 		policy_id = policy_message->sadb_x_policy_id;
 		T_LOG("Added policy id %u", policy_id);
-		send_pfkey_spd_enable_message(pfkey_socket, policy_id);;
+		send_pfkey_spd_enable_message(pfkey_socket, policy_id);
 		break;
 	}
 	case SADB_X_SPDENABLE:
@@ -1241,7 +1253,7 @@ pfkey_process_message_test_60822956(uint8_t **mhp, int pfkey_socket)
 		T_QUIET; T_ASSERT_NOTNULL(policy_message, "spd add policy message is NULL");
 		policy_id = policy_message->sadb_x_policy_id;
 		T_LOG("Added policy id %u", policy_id);
-		send_pfkey_spd_disable_message(pfkey_socket, policy_id);;
+		send_pfkey_spd_disable_message(pfkey_socket, policy_id);
 		break;
 	}
 	case SADB_X_SPDDISABLE:
@@ -1638,6 +1650,113 @@ pfkey_process_message_test_60687183_2(uint8_t **mhp, int pfkey_socket)
 	return;
 }
 
+static void
+pfkey_process_message_test_78944570(uint8_t **mhp, int pfkey_socket)
+{
+	struct sadb_msg *message = (struct sadb_msg *)(void *)mhp[0];
+
+	if (message->sadb_msg_pid != (uint32_t)getpid()) {
+		return;
+	}
+
+	switch (message->sadb_msg_type) {
+	case SADB_X_SPDADD:
+	{
+		if (message->sadb_msg_errno != 0) {
+			T_QUIET; T_ASSERT_EQ(message->sadb_msg_errno, EINVAL, "SADB error for type %u error %d", message->sadb_msg_type, message->sadb_msg_errno);
+			T_PASS("SADB spd add received EINVAL");
+			T_END;
+		} else {
+			T_FAIL("SADB spd add received success");
+			T_END;
+		}
+		break;
+	}
+	case SADB_FLUSH:
+	case SADB_X_SPDFLUSH:
+		break;
+	default:
+		T_FAIL("bad SADB message type %u", message->sadb_msg_type);
+		T_END;
+	}
+	return;
+}
+
+static int
+setup_tcp_server(uint16_t port)
+{
+	struct sockaddr_in server_addr = {};
+	int server_fd = -1;
+
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(server_fd = socket(AF_INET, SOCK_STREAM, 0),
+	    "tcp server socket creation failed");
+
+	server_addr.sin_family = AF_INET;
+	server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+	server_addr.sin_port = htons(port);
+
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(bind(server_fd, (struct sockaddr *)&server_addr,
+	    sizeof(server_addr)), "tcp server bind failed");
+
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(listen(server_fd, 2), "tcp server listen failed");
+	return server_fd;
+}
+
+static int
+setup_loopback_tcp_client(uint16_t server_port)
+{
+	struct sockaddr_in conn_addr = {};
+	int client_fd = -1;
+
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(client_fd = socket(AF_INET, SOCK_STREAM, 0),
+	    "tcp client socket creation failed");
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(inet_pton(AF_INET, "127.0.0.1", &conn_addr.sin_addr),
+	    "loopback address inet_pton failed");
+
+	conn_addr.sin_family = AF_INET;
+	conn_addr.sin_port = htons(server_port);
+
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(connect(client_fd, (struct sockaddr *)&conn_addr, sizeof(conn_addr)),
+	    "tcp loopback client connect failed");
+	return client_fd;
+}
+
+static void
+setup_socket_policy(int socket_fd)
+{
+	uint8_t buf[
+		sizeof(struct sadb_x_policy) +
+		sizeof(struct sadb_x_ipsecrequest) +
+		sizeof(struct sockaddr_in) +
+		sizeof(struct sockaddr_in)
+	];
+
+	struct sadb_x_policy *xpl = (struct sadb_x_policy *)buf;
+	struct sadb_x_ipsecrequest *xisr = (struct sadb_x_ipsecrequest *)(xpl + 1);
+	struct sockaddr *sa;
+
+
+	bzero(buf, sizeof(buf));
+	/* xpl: */
+	xpl->sadb_x_policy_len = sizeof(buf) >> 3;
+	xpl->sadb_x_policy_dir = IPSEC_DIR_INBOUND;
+	xpl->sadb_x_policy_type = IPSEC_POLICY_IPSEC;
+	/* xisr: */
+	xisr->sadb_x_ipsecrequest_len = sizeof(buf) - sizeof(*xpl);
+	xisr->sadb_x_ipsecrequest_proto = IPPROTO_ESP;
+	xisr->sadb_x_ipsecrequest_mode = IPSEC_MODE_TRANSPORT;
+	xisr->sadb_x_ipsecrequest_level = IPSEC_LEVEL_DEFAULT;
+	/* src sockaddr: */
+	sa = (struct sockaddr *)(xisr + 1);
+	sa->sa_len = sizeof(struct sockaddr_in);
+	/* dst sockaddr: */
+	sa = (struct sockaddr *)((void *)(xisr + 1) + sa->sa_len);
+	sa->sa_len = sizeof(struct sockaddr_in);
+
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(setsockopt(socket_fd, IPPROTO_IP, IP_IPSEC_POLICY,
+	    buf, sizeof(buf)), "tcp server listen failed");
+}
+
 T_DECL(sadb_x_get_60822136, "security policy reference count overflow")
 {
 	test_id = TEST_SADB_X_GET_OVERFLOW_60822136;
@@ -1686,7 +1805,7 @@ T_DECL(sadb_update_60679513, "security association use after free")
 	dispatch_main();
 }
 
-T_DECL(sadb_dump_60768729, "security association sa dump heap overflow")
+T_DECL(sadb_dump_60768729, "security association sa dump heap overflow", T_META_ENABLED(false))
 {
 	test_id = TEST_SADB_DUMP_HEAP_OVERFLOW_60768729;
 
@@ -1699,7 +1818,8 @@ T_DECL(sadb_dump_60768729, "security association sa dump heap overflow")
 	dispatch_main();
 }
 
-T_DECL(sadb_policy_dump_60769680, "security association sa policy dump heap overflow")
+// Disabled due to rdar://92910783
+T_DECL(sadb_policy_dump_60769680, "security association sa policy dump heap overflow", T_META_ENABLED(false))
 {
 	test_id = TEST_SADB_POLICY_DUMP_HEAP_OVERFLOW_60769680;
 
@@ -1773,6 +1893,33 @@ T_DECL(sadb_key_migrate_bad_address, "security association migrate bad address")
 	send_pfkey_flush_sa(pfkey_socket);
 	send_pfkey_flush_sp(pfkey_socket);
 	send_pkey_add_sa(pfkey_socket, 0x12345678, TEST_SRC_ADDRESS_IPv6, TEST_DST_ADDRESS_IPv6, AF_INET6);
+
+	dispatch_main();
+}
+
+T_DECL(tcp_input_ipsec_copy_policy, "listener policy copied to child")
+{
+	test_id = TEST_TCP_INPUT_IPSEC_COPY_POLICY;
+
+	int server_fd = setup_tcp_server(4000);
+	setup_socket_policy(server_fd);
+	int client_fd = setup_loopback_tcp_client(4000);
+
+	sleep(3);
+	close(client_fd);
+	close(server_fd);
+
+	T_PASS("listener policy copied to child");
+}
+
+T_DECL(sadb_x_spd_add_78944570, "security policy add failure")
+{
+	test_id = TEST_SADB_X_SPDADD_MEMORY_LEAK_78944570;
+
+	int pfkey_socket = pfkey_setup_socket();
+	send_pfkey_flush_sa(pfkey_socket);
+	send_pfkey_flush_sp(pfkey_socket);
+	send_pfkey_spd_add_message(pfkey_socket, IPSEC_ULPROTO_ANY);
 
 	dispatch_main();
 }

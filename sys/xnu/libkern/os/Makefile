@@ -7,31 +7,44 @@ include $(MakeInc_cmd)
 include $(MakeInc_def)
 
 KERNELFILES = \
+	atomic.h \
+	alloc_util.h \
 	base.h \
-	object.h \
+	cpp_util.h \
 	log.h \
-	trace.h \
+	object.h \
 	overflow.h \
-	smart_ptr.h \
-	cpp_util.h
+	trace.h
 
 PRIVATE_KERNELFILES = \
+	atomic_private.h	\
+	atomic_private_arch.h	\
+	atomic_private_impl.h	\
+	base_private.h \
 	hash.h \
-	object_private.h \
 	ptrtools.h \
 	reason_private.h \
 	refcnt.h \
-	refcnt_internal.h
+	refcnt_internal.h \
+	system_event_log.h
 
 DATAFILES = \
+	atomic.h \
+	base.h \
 	overflow.h
 
 DRIVERKIT_DATAFILES = \
+	atomic.h \
 	base.h \
 	overflow.h
 
 PRIVATE_DATAFILES = \
-	reason_private.h
+	atomic_private.h	\
+	atomic_private_arch.h	\
+	atomic_private_impl.h	\
+	base_private.h \
+	reason_private.h \
+	system_event_log.h
 
 INSTALL_MI_LIST = ${DATAFILES}
 

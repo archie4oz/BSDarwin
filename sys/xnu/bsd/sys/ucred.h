@@ -80,6 +80,7 @@ struct label;
 #ifdef __APPLE_API_UNSTABLE
 #ifdef KERNEL
 #include <sys/queue.h>
+#include <os/base.h>
 
 /*
  * In-kernel credential structure.
@@ -88,14 +89,13 @@ struct label;
  * it or copies of it be exported outside.
  */
 struct ucred {
-	LIST_ENTRY(ucred)       cr_link; /* never modify this without KAUTH_CRED_HASH_LOCK */
-#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L && !defined(__STDC_NO_ATOMICS__)
-	_Atomic u_long          cr_ref;  /* reference count */
-#elif defined(__cplusplus) && __cplusplus >= 201103L
-	_Atomic u_long          cr_ref;  /* reference count */
+#if BSD_KERNEL_PRIVATE
+	struct ucred_rw        *cr_rw;
+	void                   *cr_unused;
 #else
-	volatile u_long         cr_ref;  /* reference count */
+	LIST_ENTRY(ucred)       cr_link; /* never modify this without KAUTH_CRED_HASH_LOCK */
 #endif
+	u_long                  cr_ref;  /* reference count */
 
 	struct posix_cred {
 		/*
@@ -105,14 +105,18 @@ struct ucred {
 		uid_t   cr_uid;         /* effective user id */
 		uid_t   cr_ruid;        /* real user id */
 		uid_t   cr_svuid;       /* saved user id */
-		short   cr_ngroups;     /* number of groups in advisory list */
+		u_short cr_ngroups;     /* number of groups in advisory list */
+#if XNU_KERNEL_PRIVATE
+		u_short __cr_padding;
+#endif
 		gid_t   cr_groups[NGROUPS];/* advisory group list */
 		gid_t   cr_rgid;        /* real group id */
 		gid_t   cr_svgid;       /* saved group id */
 		uid_t   cr_gmuid;       /* UID for group membership purposes */
 		int     cr_flags;       /* flags on credential */
 	} cr_posix;
-	struct label    *cr_label;      /* MAC label */
+	struct label    * OS_PTRAUTH_SIGNED_PTR_AUTH_NULL("ucred.cr_label") cr_label;     /* MAC label */
+
 	/*
 	 * NOTE: If anything else (besides the flags)
 	 * added after the label, you must change

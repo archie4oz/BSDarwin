@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2007-2010 Apple Inc. All rights reserved.
+ * Copyright (c) 2007-2020 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -169,7 +169,7 @@ static void pfr_enqueue_addrs(struct pfr_ktable *, struct pfr_kentryworkq *,
 static void pfr_mark_addrs(struct pfr_ktable *);
 static struct pfr_kentry *pfr_lookup_addr(struct pfr_ktable *,
     struct pfr_addr *, int);
-static struct pfr_kentry *pfr_create_kentry(struct pfr_addr *, int);
+static struct pfr_kentry *pfr_create_kentry(struct pfr_addr *, boolean_t);
 static void pfr_destroy_kentries(struct pfr_kentryworkq *);
 static void pfr_destroy_kentry(struct pfr_kentry *);
 static void pfr_insert_kentries(struct pfr_ktable *,
@@ -799,13 +799,11 @@ pfr_validate_addr(struct pfr_addr *ad)
 		}
 		break;
 #endif /* INET */
-#if INET6
 	case AF_INET6:
 		if (ad->pfra_net > 128) {
 			return -1;
 		}
 		break;
-#endif /* INET6 */
 	default:
 		return -1;
 	}
@@ -877,7 +875,7 @@ pfr_lookup_addr(struct pfr_ktable *kt, struct pfr_addr *ad, int exact)
 	struct radix_node_head  *head;
 	struct pfr_kentry       *ke;
 
-	LCK_MTX_ASSERT(pf_lock, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(&pf_lock, LCK_MTX_ASSERT_OWNED);
 
 	bzero(&sa, sizeof(sa));
 	if (ad->pfra_af == AF_INET) {
@@ -908,7 +906,7 @@ pfr_lookup_addr(struct pfr_ktable *kt, struct pfr_addr *ad, int exact)
 }
 
 static struct pfr_kentry *
-pfr_create_kentry(struct pfr_addr *ad, int intr)
+pfr_create_kentry(struct pfr_addr *ad, boolean_t intr)
 {
 	struct pfr_kentry       *ke;
 
@@ -930,7 +928,7 @@ pfr_create_kentry(struct pfr_addr *ad, int intr)
 	ke->pfrke_af = ad->pfra_af;
 	ke->pfrke_net = ad->pfra_net;
 	ke->pfrke_not = ad->pfra_not;
-	ke->pfrke_intrpool = intr;
+	ke->pfrke_intrpool = (u_int8_t)intr;
 	return ke;
 }
 
@@ -985,7 +983,7 @@ pfr_insert_kentry(struct pfr_ktable *kt, struct pfr_addr *ad, u_int64_t tzero)
 	if (p != NULL) {
 		return 0;
 	}
-	p = pfr_create_kentry(ad, 1);
+	p = pfr_create_kentry(ad, TRUE);
 	if (p == NULL) {
 		return EINVAL;
 	}
@@ -1032,7 +1030,7 @@ pfr_clstats_kentries(struct pfr_kentryworkq *workq, u_int64_t tzero,
 {
 	struct pfr_kentry       *p;
 
-	LCK_MTX_ASSERT(pf_lock, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(&pf_lock, LCK_MTX_ASSERT_OWNED);
 
 	SLIST_FOREACH(p, workq, pfrke_workq) {
 		if (negchange) {
@@ -1093,7 +1091,7 @@ pfr_route_kentry(struct pfr_ktable *kt, struct pfr_kentry *ke)
 	struct radix_node       *rn;
 	struct radix_node_head  *head;
 
-	LCK_MTX_ASSERT(pf_lock, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(&pf_lock, LCK_MTX_ASSERT_OWNED);
 
 	bzero(ke->pfrke_node, sizeof(ke->pfrke_node));
 	if (ke->pfrke_af == AF_INET) {
@@ -1121,7 +1119,7 @@ pfr_unroute_kentry(struct pfr_ktable *kt, struct pfr_kentry *ke)
 	struct radix_node       *rn;
 	struct radix_node_head  *head;
 
-	LCK_MTX_ASSERT(pf_lock, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(&pf_lock, LCK_MTX_ASSERT_OWNED);
 
 	if (ke->pfrke_af == AF_INET) {
 		head = kt->pfrkt_ip4;
@@ -1169,8 +1167,9 @@ pfr_walktree(struct radix_node *rn, void *arg)
 	struct pfr_walktree     *w = arg;
 	int                      flags = w->pfrw_flags;
 
-	LCK_MTX_ASSERT(pf_lock, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(&pf_lock, LCK_MTX_ASSERT_OWNED);
 
+	VERIFY(ke != NULL);
 	switch (w->pfrw_op) {
 	case PFRW_MARK:
 		ke->pfrke_mark = 0;
@@ -1179,7 +1178,7 @@ pfr_walktree(struct radix_node *rn, void *arg)
 		if (ke->pfrke_mark) {
 			break;
 		}
-	/* FALLTHROUGH */
+		OS_FALLTHROUGH;
 	case PFRW_ENQUEUE:
 		SLIST_INSERT_HEAD(w->pfrw_workq, ke, pfrke_workq);
 		w->pfrw_cnt++;
@@ -1256,7 +1255,7 @@ pfr_clr_tables(struct pfr_table *filter, int *ndel, int flags)
 	struct pfr_ktable       *p;
 	int                      xdel = 0;
 
-	LCK_MTX_ASSERT(pf_lock, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(&pf_lock, LCK_MTX_ASSERT_OWNED);
 
 	ACCEPT_FLAGS(flags, PFR_FLAG_ATOMIC | PFR_FLAG_DUMMY |
 	    PFR_FLAG_ALLRSETS);
@@ -1299,7 +1298,7 @@ pfr_add_tables(user_addr_t tbl, int size, int *nadd, int flags)
 	int                      i, rv, xadd = 0;
 	u_int64_t                tzero = pf_calendar_time_second();
 
-	LCK_MTX_ASSERT(pf_lock, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(&pf_lock, LCK_MTX_ASSERT_OWNED);
 
 	ACCEPT_FLAGS(flags, PFR_FLAG_ATOMIC | PFR_FLAG_DUMMY);
 	SLIST_INIT(&addq);
@@ -1322,6 +1321,7 @@ pfr_add_tables(user_addr_t tbl, int size, int *nadd, int flags)
 			}
 			SLIST_FOREACH(q, &addq, pfrkt_workq) {
 				if (!pfr_ktable_compare(p, q)) {
+					pfr_destroy_ktable(p, 0);
 					goto _skip;
 				}
 			}
@@ -1386,7 +1386,7 @@ pfr_del_tables(user_addr_t tbl, int size, int *ndel, int flags)
 	struct pfr_ktable       *p, *q, key;
 	int                      i, xdel = 0;
 
-	LCK_MTX_ASSERT(pf_lock, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(&pf_lock, LCK_MTX_ASSERT_OWNED);
 
 	ACCEPT_FLAGS(flags, PFR_FLAG_ATOMIC | PFR_FLAG_DUMMY);
 	SLIST_INIT(&workq);
@@ -1470,7 +1470,7 @@ pfr_get_tstats(struct pfr_table *filter, user_addr_t tbl, int *size,
 	int                      n, nn;
 	u_int64_t                tzero = pf_calendar_time_second();
 
-	LCK_MTX_ASSERT(pf_lock, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(&pf_lock, LCK_MTX_ASSERT_OWNED);
 
 	/* XXX PFR_FLAG_CLSTATS disabled */
 	ACCEPT_FLAGS(flags, PFR_FLAG_ATOMIC | PFR_FLAG_ALLRSETS);
@@ -1519,7 +1519,7 @@ pfr_clr_tstats(user_addr_t tbl, int size, int *nzero, int flags)
 	int                      i, xzero = 0;
 	u_int64_t                tzero = pf_calendar_time_second();
 
-	LCK_MTX_ASSERT(pf_lock, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(&pf_lock, LCK_MTX_ASSERT_OWNED);
 
 	ACCEPT_FLAGS(flags, PFR_FLAG_ATOMIC | PFR_FLAG_DUMMY |
 	    PFR_FLAG_ADDRSTOO);
@@ -1555,7 +1555,7 @@ pfr_set_tflags(user_addr_t tbl, int size, int setflag, int clrflag,
 	struct pfr_ktable       *p, *q, key;
 	int                      i, xchange = 0, xdel = 0;
 
-	LCK_MTX_ASSERT(pf_lock, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(&pf_lock, LCK_MTX_ASSERT_OWNED);
 
 	ACCEPT_FLAGS(flags, PFR_FLAG_ATOMIC | PFR_FLAG_DUMMY);
 	if ((setflag & ~PFR_TFLAG_USRMASK) ||
@@ -1616,7 +1616,7 @@ pfr_ina_begin(struct pfr_table *trs, u_int32_t *ticket, int *ndel, int flags)
 	struct pf_ruleset       *rs;
 	int                      xdel = 0;
 
-	LCK_MTX_ASSERT(pf_lock, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(&pf_lock, LCK_MTX_ASSERT_OWNED);
 
 	ACCEPT_FLAGS(flags, PFR_FLAG_DUMMY);
 	rs = pf_find_or_create_ruleset(trs->pfrt_anchor);
@@ -1640,7 +1640,7 @@ pfr_ina_begin(struct pfr_table *trs, u_int32_t *ticket, int *ndel, int flags)
 		}
 		rs->topen = 1;
 	} else {
-		pf_remove_if_empty_ruleset(rs);
+		pf_release_ruleset(rs);
 	}
 	if (ndel != NULL) {
 		*ndel = xdel;
@@ -1660,7 +1660,7 @@ pfr_ina_define(struct pfr_table *tbl, user_addr_t addr, int size,
 	struct pf_ruleset       *rs;
 	int                      i, rv, xadd = 0, xaddr = 0;
 
-	LCK_MTX_ASSERT(pf_lock, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(&pf_lock, LCK_MTX_ASSERT_OWNED);
 
 	ACCEPT_FLAGS(flags, PFR_FLAG_DUMMY | PFR_FLAG_ADDRSTOO);
 	if (size && !(flags & PFR_FLAG_ADDRSTOO)) {
@@ -1674,6 +1674,8 @@ pfr_ina_define(struct pfr_table *tbl, user_addr_t addr, int size,
 	if (rs == NULL || !rs->topen || ticket != rs->tticket) {
 		return EBUSY;
 	}
+	pf_release_ruleset(rs);
+	rs = NULL;
 	tbl->pfrt_flags |= PFR_TFLAG_INACTIVE;
 	SLIST_INIT(&tableq);
 	kt = RB_FIND(pfr_ktablehead, &pfr_ktables, (struct pfr_ktable *)(void *)tbl);
@@ -1724,7 +1726,7 @@ _skip:
 		if (pfr_lookup_addr(shadow, &ad, 1) != NULL) {
 			continue;
 		}
-		p = pfr_create_kentry(&ad, 0);
+		p = pfr_create_kentry(&ad, FALSE);
 		if (p == NULL) {
 			senderr(ENOMEM);
 		}
@@ -1772,12 +1774,12 @@ pfr_ina_rollback(struct pfr_table *trs, u_int32_t ticket, int *ndel, int flags)
 	struct pf_ruleset       *rs;
 	int                      xdel = 0;
 
-	LCK_MTX_ASSERT(pf_lock, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(&pf_lock, LCK_MTX_ASSERT_OWNED);
 
 	ACCEPT_FLAGS(flags, PFR_FLAG_DUMMY);
 	rs = pf_find_ruleset(trs->pfrt_anchor);
 	if (rs == NULL || !rs->topen || ticket != rs->tticket) {
-		return 0;
+		goto done;
 	}
 	SLIST_INIT(&workq);
 	RB_FOREACH(p, pfr_ktablehead, &pfr_ktables) {
@@ -1792,10 +1794,14 @@ pfr_ina_rollback(struct pfr_table *trs, u_int32_t ticket, int *ndel, int flags)
 	if (!(flags & PFR_FLAG_DUMMY)) {
 		pfr_setflags_ktables(&workq);
 		rs->topen = 0;
-		pf_remove_if_empty_ruleset(rs);
 	}
 	if (ndel != NULL) {
 		*ndel = xdel;
+	}
+done:
+	if (rs) {
+		pf_release_ruleset(rs);
+		rs = NULL;
 	}
 	return 0;
 }
@@ -1809,13 +1815,15 @@ pfr_ina_commit(struct pfr_table *trs, u_int32_t ticket, int *nadd,
 	struct pf_ruleset       *rs;
 	int                      xadd = 0, xchange = 0;
 	u_int64_t                tzero = pf_calendar_time_second();
+	int                      err = 0;
 
-	LCK_MTX_ASSERT(pf_lock, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(&pf_lock, LCK_MTX_ASSERT_OWNED);
 
 	ACCEPT_FLAGS(flags, PFR_FLAG_ATOMIC | PFR_FLAG_DUMMY);
 	rs = pf_find_ruleset(trs->pfrt_anchor);
 	if (rs == NULL || !rs->topen || ticket != rs->tticket) {
-		return EBUSY;
+		err = EBUSY;
+		goto done;
 	}
 
 	SLIST_INIT(&workq);
@@ -1838,7 +1846,6 @@ pfr_ina_commit(struct pfr_table *trs, u_int32_t ticket, int *nadd,
 			pfr_commit_ktable(p, tzero);
 		}
 		rs->topen = 0;
-		pf_remove_if_empty_ruleset(rs);
 	}
 	if (nadd != NULL) {
 		*nadd = xadd;
@@ -1847,7 +1854,12 @@ pfr_ina_commit(struct pfr_table *trs, u_int32_t ticket, int *nadd,
 		*nchange = xchange;
 	}
 
-	return 0;
+done:
+	if (rs != NULL) {
+		pf_release_ruleset(rs);
+		rs = NULL;
+	}
+	return err;
 }
 
 static void
@@ -1856,7 +1868,7 @@ pfr_commit_ktable(struct pfr_ktable *kt, u_int64_t tzero)
 	struct pfr_ktable       *shadow = kt->pfrkt_shadow;
 	int                      nflags;
 
-	LCK_MTX_ASSERT(pf_lock, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(&pf_lock, LCK_MTX_ASSERT_OWNED);
 
 	if (shadow->pfrkt_cnt == NO_ADDRESSES) {
 		if (!(kt->pfrkt_flags & PFR_TFLAG_ACTIVE)) {
@@ -1923,7 +1935,7 @@ pfr_table_copyin_cleanup(struct pfr_table *tbl)
 static int
 pfr_validate_table(struct pfr_table *tbl, int allowedflags, int no_reserved)
 {
-	int i;
+	size_t i;
 
 	if (!tbl->pfrt_name[0]) {
 		return -1;
@@ -1956,7 +1968,7 @@ static int
 pfr_fix_anchor(char *anchor)
 {
 	size_t siz = MAXPATHLEN;
-	int i;
+	size_t i;
 
 	if (anchor[0] == '/') {
 		char *path;
@@ -1973,7 +1985,7 @@ pfr_fix_anchor(char *anchor)
 	if (anchor[siz - 1]) {
 		return -1;
 	}
-	for (i = strlen(anchor); i < (int)siz; i++) {
+	for (i = strlen(anchor); i < siz; i++) {
 		if (anchor[i]) {
 			return -1;
 		}
@@ -1990,8 +2002,14 @@ pfr_table_count(struct pfr_table *filter, int flags)
 		return pfr_ktable_cnt;
 	}
 	if (filter->pfrt_anchor[0]) {
+		int r = -1;
 		rs = pf_find_ruleset(filter->pfrt_anchor);
-		return (rs != NULL) ? rs->tables : -1;
+		r = (rs != NULL) ? rs->tables : -1;
+		if (rs) {
+			pf_release_ruleset(rs);
+			rs = NULL;
+		}
+		return r;
 	}
 	return pf_main_ruleset.tables;
 }
@@ -2013,7 +2031,7 @@ pfr_insert_ktables(struct pfr_ktableworkq *workq)
 {
 	struct pfr_ktable       *p;
 
-	LCK_MTX_ASSERT(pf_lock, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(&pf_lock, LCK_MTX_ASSERT_OWNED);
 
 	SLIST_FOREACH(p, workq, pfrkt_workq)
 	pfr_insert_ktable(p);
@@ -2022,7 +2040,7 @@ pfr_insert_ktables(struct pfr_ktableworkq *workq)
 static void
 pfr_insert_ktable(struct pfr_ktable *kt)
 {
-	LCK_MTX_ASSERT(pf_lock, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(&pf_lock, LCK_MTX_ASSERT_OWNED);
 
 	RB_INSERT(pfr_ktablehead, &pfr_ktables, kt);
 	pfr_ktable_cnt++;
@@ -2039,7 +2057,7 @@ pfr_setflags_ktables(struct pfr_ktableworkq *workq)
 {
 	struct pfr_ktable       *p, *q;
 
-	LCK_MTX_ASSERT(pf_lock, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(&pf_lock, LCK_MTX_ASSERT_OWNED);
 
 	for (p = SLIST_FIRST(workq); p; p = q) {
 		q = SLIST_NEXT(p, pfrkt_workq);
@@ -2052,9 +2070,10 @@ pfr_setflags_ktable(struct pfr_ktable *kt, int newf)
 {
 	struct pfr_kentryworkq  addrq;
 
-	LCK_MTX_ASSERT(pf_lock, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(&pf_lock, LCK_MTX_ASSERT_OWNED);
 
 	if (!(newf & PFR_TFLAG_REFERENCED) &&
+	    !(newf & PFR_TFLAG_REFDANCHOR) &&
 	    !(newf & PFR_TFLAG_PERSIST)) {
 		newf &= ~PFR_TFLAG_ACTIVE;
 	}
@@ -2090,7 +2109,7 @@ pfr_clstats_ktables(struct pfr_ktableworkq *workq, u_int64_t tzero, int recurse)
 {
 	struct pfr_ktable       *p;
 
-	LCK_MTX_ASSERT(pf_lock, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(&pf_lock, LCK_MTX_ASSERT_OWNED);
 
 	SLIST_FOREACH(p, workq, pfrkt_workq)
 	pfr_clstats_ktable(p, tzero, recurse);
@@ -2101,7 +2120,7 @@ pfr_clstats_ktable(struct pfr_ktable *kt, u_int64_t tzero, int recurse)
 {
 	struct pfr_kentryworkq   addrq;
 
-	LCK_MTX_ASSERT(pf_lock, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(&pf_lock, LCK_MTX_ASSERT_OWNED);
 
 	if (recurse) {
 		pfr_enqueue_addrs(kt, &addrq, NULL, 0);
@@ -2119,7 +2138,7 @@ pfr_create_ktable(struct pfr_table *tbl, u_int64_t tzero, int attachruleset)
 	struct pfr_ktable       *kt;
 	struct pf_ruleset       *rs;
 
-	LCK_MTX_ASSERT(pf_lock, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(&pf_lock, LCK_MTX_ASSERT_OWNED);
 
 	kt = pool_get(&pfr_ktable_pl, PR_WAITOK);
 	if (kt == NULL) {
@@ -2155,7 +2174,7 @@ pfr_destroy_ktables(struct pfr_ktableworkq *workq, int flushaddr)
 {
 	struct pfr_ktable       *p, *q;
 
-	LCK_MTX_ASSERT(pf_lock, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(&pf_lock, LCK_MTX_ASSERT_OWNED);
 
 	for (p = SLIST_FIRST(workq); p; p = q) {
 		q = SLIST_NEXT(p, pfrkt_workq);
@@ -2168,7 +2187,7 @@ pfr_destroy_ktable(struct pfr_ktable *kt, int flushaddr)
 {
 	struct pfr_kentryworkq   addrq;
 
-	LCK_MTX_ASSERT(pf_lock, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(&pf_lock, LCK_MTX_ASSERT_OWNED);
 
 	if (flushaddr) {
 		pfr_enqueue_addrs(kt, &addrq, NULL, 0);
@@ -2176,17 +2195,17 @@ pfr_destroy_ktable(struct pfr_ktable *kt, int flushaddr)
 		pfr_destroy_kentries(&addrq);
 	}
 	if (kt->pfrkt_ip4 != NULL) {
-		_FREE((caddr_t)kt->pfrkt_ip4, M_RTABLE);
+		zfree(radix_node_head_zone, kt->pfrkt_ip4);
 	}
 	if (kt->pfrkt_ip6 != NULL) {
-		_FREE((caddr_t)kt->pfrkt_ip6, M_RTABLE);
+		zfree(radix_node_head_zone, kt->pfrkt_ip6);
 	}
 	if (kt->pfrkt_shadow != NULL) {
 		pfr_destroy_ktable(kt->pfrkt_shadow, flushaddr);
 	}
 	if (kt->pfrkt_rs != NULL) {
 		kt->pfrkt_rs->tables--;
-		pf_remove_if_empty_ruleset(kt->pfrkt_rs);
+		pf_release_ruleset(kt->pfrkt_rs);
 	}
 	pool_put(&pfr_ktable_pl, kt);
 }
@@ -2205,7 +2224,7 @@ pfr_ktable_compare(struct pfr_ktable *p, struct pfr_ktable *q)
 static struct pfr_ktable *
 pfr_lookup_table(struct pfr_table *tbl)
 {
-	LCK_MTX_ASSERT(pf_lock, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(&pf_lock, LCK_MTX_ASSERT_OWNED);
 
 	/* struct pfr_ktable start like a struct pfr_table */
 	return RB_FIND(pfr_ktablehead, &pfr_ktables,
@@ -2218,7 +2237,7 @@ pfr_match_addr(struct pfr_ktable *kt, struct pf_addr *a, sa_family_t af)
 	struct pfr_kentry       *ke = NULL;
 	int                      match;
 
-	LCK_MTX_ASSERT(pf_lock, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(&pf_lock, LCK_MTX_ASSERT_OWNED);
 
 	if (!(kt->pfrkt_flags & PFR_TFLAG_ACTIVE) && kt->pfrkt_root != NULL) {
 		kt = kt->pfrkt_root;
@@ -2237,7 +2256,6 @@ pfr_match_addr(struct pfr_ktable *kt, struct pf_addr *a, sa_family_t af)
 		}
 		break;
 #endif /* INET */
-#if INET6
 	case AF_INET6:
 		bcopy(a, &pfr_sin6.sin6_addr, sizeof(pfr_sin6.sin6_addr));
 		ke = (struct pfr_kentry *)rn_match(&pfr_sin6, kt->pfrkt_ip6);
@@ -2245,7 +2263,6 @@ pfr_match_addr(struct pfr_ktable *kt, struct pf_addr *a, sa_family_t af)
 			ke = NULL;
 		}
 		break;
-#endif /* INET6 */
 	}
 	match = (ke && !ke->pfrke_not);
 	if (match) {
@@ -2262,7 +2279,7 @@ pfr_update_stats(struct pfr_ktable *kt, struct pf_addr *a, sa_family_t af,
 {
 	struct pfr_kentry       *ke = NULL;
 
-	LCK_MTX_ASSERT(pf_lock, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(&pf_lock, LCK_MTX_ASSERT_OWNED);
 
 	if (!(kt->pfrkt_flags & PFR_TFLAG_ACTIVE) && kt->pfrkt_root != NULL) {
 		kt = kt->pfrkt_root;
@@ -2281,7 +2298,6 @@ pfr_update_stats(struct pfr_ktable *kt, struct pf_addr *a, sa_family_t af,
 		}
 		break;
 #endif /* INET */
-#if INET6
 	case AF_INET6:
 		bcopy(a, &pfr_sin6.sin6_addr, sizeof(pfr_sin6.sin6_addr));
 		ke = (struct pfr_kentry *)rn_match(&pfr_sin6, kt->pfrkt_ip6);
@@ -2289,7 +2305,6 @@ pfr_update_stats(struct pfr_ktable *kt, struct pf_addr *a, sa_family_t af,
 			ke = NULL;
 		}
 		break;
-#endif /* INET6 */
 	default:
 		;
 	}
@@ -2314,7 +2329,7 @@ pfr_attach_table(struct pf_ruleset *rs, char *name)
 	struct pfr_table         tbl;
 	struct pf_anchor        *ac = rs->anchor;
 
-	LCK_MTX_ASSERT(pf_lock, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(&pf_lock, LCK_MTX_ASSERT_OWNED);
 
 	bzero(&tbl, sizeof(tbl));
 	strlcpy(tbl.pfrt_name, name, sizeof(tbl.pfrt_name));
@@ -2351,7 +2366,7 @@ pfr_attach_table(struct pf_ruleset *rs, char *name)
 void
 pfr_detach_table(struct pfr_ktable *kt)
 {
-	LCK_MTX_ASSERT(pf_lock, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(&pf_lock, LCK_MTX_ASSERT_OWNED);
 
 	if (kt->pfrkt_refcnt[PFR_REFCNT_RULE] <= 0) {
 		printf("pfr_detach_table: refcount = %d.\n",
@@ -2370,7 +2385,7 @@ pfr_pool_get(struct pfr_ktable *kt, int *pidx, struct pf_addr *counter,
 	union sockaddr_union     mask;
 	int                      idx = -1, use_counter = 0;
 
-	LCK_MTX_ASSERT(pf_lock, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(&pf_lock, LCK_MTX_ASSERT_OWNED);
 
 	if (af == AF_INET) {
 		addr = (struct pf_addr *)&pfr_sin.sin_addr;
@@ -2467,7 +2482,7 @@ pfr_kentry_byidx(struct pfr_ktable *kt, int idx, int af)
 {
 	struct pfr_walktree     w;
 
-	LCK_MTX_ASSERT(pf_lock, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(&pf_lock, LCK_MTX_ASSERT_OWNED);
 
 	bzero(&w, sizeof(w));
 	w.pfrw_op = PFRW_POOL_GET;
@@ -2480,12 +2495,10 @@ pfr_kentry_byidx(struct pfr_ktable *kt, int idx, int af)
 		    pfr_walktree, &w);
 		return w.pfrw_kentry;
 #endif /* INET */
-#if INET6
 	case AF_INET6:
 		(void) kt->pfrkt_ip6->rnh_walktree(kt->pfrkt_ip6,
 		    pfr_walktree, &w);
 		return w.pfrw_kentry;
-#endif /* INET6 */
 	default:
 		return NULL;
 	}
@@ -2496,7 +2509,7 @@ pfr_dynaddr_update(struct pfr_ktable *kt, struct pfi_dynaddr *dyn)
 {
 	struct pfr_walktree     w;
 
-	LCK_MTX_ASSERT(pf_lock, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(&pf_lock, LCK_MTX_ASSERT_OWNED);
 
 	bzero(&w, sizeof(w));
 	w.pfrw_op = PFRW_DYNADDR_UPDATE;

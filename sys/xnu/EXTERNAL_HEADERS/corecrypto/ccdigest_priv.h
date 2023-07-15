@@ -1,11 +1,12 @@
-/*
- *  ccdigest_priv.h
- *  corecrypto
+/* Copyright (c) (2010-2012,2015-2019,2021) Apple Inc. All rights reserved.
  *
- *  Created on 12/07/2010
- *
- *  Copyright (c) 2010,2011,2012,2015 Apple Inc. All rights reserved.
- *
+ * corecrypto is licensed under Apple Inc.’s Internal Use License Agreement (which
+ * is contained in the License.txt file distributed with corecrypto) and only to 
+ * people who accept that license. IMPORTANT:  Any license rights granted to you by 
+ * Apple Inc. (if any) are limited to internal use within your organization only on 
+ * devices and computers you own or control, for the sole purpose of verifying the 
+ * security characteristics and correct functioning of the Apple Software.  You may 
+ * not, directly or indirectly, redistribute the Apple Software or any portions thereof.
  */
 
 #ifndef _CORECRYPTO_CCDIGEST_PRIV_H_
@@ -17,8 +18,6 @@
 
 CC_INLINE CC_NONNULL((1))
 bool ccdigest_oid_equal(const struct ccdigest_info *di, ccoid_t oid) {
-    if(di->oid == NULL && CCOID(oid) == NULL) return true;
-    if(di->oid == NULL || CCOID(oid) == NULL) return false;
     return ccoid_equal(di->oid, oid);
 }
 
