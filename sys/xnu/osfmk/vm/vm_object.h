@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2007 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -68,8 +68,6 @@
 
 #include <debug.h>
 #include <mach_assert.h>
-#include <mach_pagemap.h>
-#include <task_swapper.h>
 
 #include <mach/kern_return.h>
 #include <mach/boolean.h>
@@ -95,10 +93,8 @@
 #include <libkern/OSDebug.h>
 #include <kern/btlog.h>
 extern void vm_object_tracking_init(void);
-extern boolean_t vm_object_tracking_inited;
-extern btlog_t *vm_object_tracking_btlog;
+extern btlog_t vm_object_tracking_btlog;
 #define VM_OBJECT_TRACKING_NUM_RECORDS  50000
-#define VM_OBJECT_TRACKING_BTDEPTH 7
 #define VM_OBJECT_TRACKING_OP_CREATED   1
 #define VM_OBJECT_TRACKING_OP_MODIFIED  2
 #define VM_OBJECT_TRACKING_OP_TRUESHARE 3
@@ -118,19 +114,20 @@ struct vm_object_fault_info {
 	uint32_t        user_tag;
 	vm_size_t       cluster_size;
 	vm_behavior_t   behavior;
-	vm_map_offset_t lo_offset;
-	vm_map_offset_t hi_offset;
+	vm_object_offset_t lo_offset;
+	vm_object_offset_t hi_offset;
 	unsigned int
 	/* boolean_t */ no_cache:1,
 	/* boolean_t */ stealth:1,
 	/* boolean_t */ io_sync:1,
 	/* boolean_t */ cs_bypass:1,
-	/* boolean_t */ pmap_cs_associated:1,
+	/* boolean_t */ csm_associated:1,
 	/* boolean_t */ mark_zf_absent:1,
 	/* boolean_t */ batch_pmap_op:1,
 	/* boolean_t */ resilient_media:1,
 	/* boolean_t */ no_copy_on_read:1,
-	    __vm_object_fault_info_unused_bits:23;
+	/* boolean_t */ fi_xnu_user_debug:1,
+	    __vm_object_fault_info_unused_bits:22;
 	int             pmap_options;
 };
 
@@ -158,9 +155,6 @@ struct vm_object {
 	vm_page_queue_head_t    memq;           /* Resident memory - must be first */
 	lck_rw_t                Lock;           /* Synchronization */
 
-#if DEVELOPMENT || DEBUG
-	thread_t                Lock_owner;
-#endif
 	union {
 		vm_object_size_t  vou_size;     /* Object size (only valid if internal) */
 		int               vou_cache_pages_to_scan;      /* pages yet to be visited in an
@@ -203,7 +197,6 @@ struct vm_object {
 	memory_object_copy_strategy_t
 	    copy_strategy;                      /* How to handle data copy */
 
-#if __LP64__
 	/*
 	 * Some user processes (mostly VirtualMachine software) take a large
 	 * number of UPLs (via IOMemoryDescriptors) to wire pages in large
@@ -211,19 +204,10 @@ struct vm_object {
 	 * Since we never enforced any limit there, let's give them 32 bits
 	 * for backwards compatibility's sake.
 	 */
-	unsigned int            paging_in_progress:16,
-	    __object1_unused_bits:16;
+	unsigned short          paging_in_progress:16;
+	unsigned short          vo_size_delta;
 	unsigned int            activity_in_progress;
-#else /* __LP64__ */
-	/*
-	 * On 32-bit platforms, enlarging "activity_in_progress" would increase
-	 * the size of "struct vm_object".  Since we don't know of any actual
-	 * overflow of these counters on these platforms, let's keep the
-	 * counters as 16-bit integers.
-	 */
-	unsigned short          paging_in_progress;
-	unsigned short          activity_in_progress;
-#endif /* __LP64__ */
+
 	/* The memory object ports are
 	 * being used (e.g., for pagein
 	 * or pageout) -- don't change
@@ -316,7 +300,8 @@ struct vm_object {
 	 * primary caching. (for
 	 * I/O)
 	 */
-	/* boolean_t */ _object5_unused_bits:1;
+	/* boolean_t */ for_realtime:1;
+	/* Might be needed for realtime code path */
 
 	queue_chain_t           cached_list;    /* Attachment point for the
 	                                         * list of objects cached as a
@@ -423,15 +408,11 @@ extern void vm_object_access_tracking(vm_object_t object,
     uint32_t *acess_tracking_writes);
 #endif /* VM_OBJECT_ACCESS_TRACKING */
 
-extern
-vm_object_t     kernel_object;          /* the single kernel object */
+extern const vm_object_t kernel_object;          /* the single kernel object */
 
-extern
-vm_object_t     compressor_object;      /* the single compressor object */
+extern const vm_object_t compressor_object;      /* the single compressor object */
 
-extern
-unsigned int    vm_object_absent_max;   /* maximum number of absent pages
-                                         *  at a time for each object */
+extern const vm_object_t retired_pages_object;   /* holds VM pages which should never be used */
 
 # define        VM_MSYNC_INITIALIZED                    0
 # define        VM_MSYNC_SYNCHRONIZING                  1
@@ -536,7 +517,6 @@ extern lck_attr_t               vm_map_lck_attr;
 #define OBJECT_LOCK_EXCLUSIVE   1
 
 extern lck_grp_t        vm_object_lck_grp;
-extern lck_grp_attr_t   vm_object_lck_grp_attr;
 extern lck_attr_t       vm_object_lck_attr;
 extern lck_attr_t       kernel_object_lck_attr;
 extern lck_attr_t       compressor_object_lck_attr;
@@ -544,6 +524,7 @@ extern lck_attr_t       compressor_object_lck_attr;
 extern vm_object_t      vm_pageout_scan_wants_object;
 
 extern void             vm_object_lock(vm_object_t);
+extern bool             vm_object_lock_check_contended(vm_object_t);
 extern boolean_t        vm_object_lock_try(vm_object_t);
 extern boolean_t        _vm_object_lock_try(vm_object_t);
 extern boolean_t        vm_object_lock_avoid(vm_object_t);
@@ -559,8 +540,7 @@ extern boolean_t        vm_object_lock_upgrade(vm_object_t);
 
 #define vm_object_lock_init(object)                                     \
 	lck_rw_init(&(object)->Lock, &vm_object_lck_grp,                \
-	            (((object) == kernel_object ||                      \
-	              (object) == vm_submap_object) ?                   \
+	            ((object) == kernel_object ?                        \
 	             &kernel_object_lck_attr :                          \
 	             (((object) == compressor_object) ?                 \
 	             &compressor_object_lck_attr :                      \
@@ -597,10 +577,6 @@ extern boolean_t        vm_object_lock_upgrade(vm_object_t);
 
 __private_extern__ void         vm_object_bootstrap(void);
 
-__private_extern__ void         vm_object_init(void);
-
-__private_extern__ void         vm_object_init_lck_grp(void);
-
 __private_extern__ void         vm_object_reaper_init(void);
 
 __private_extern__ vm_object_t  vm_object_allocate(vm_object_size_t size);
@@ -608,23 +584,10 @@ __private_extern__ vm_object_t  vm_object_allocate(vm_object_size_t size);
 __private_extern__ void    _vm_object_allocate(vm_object_size_t size,
     vm_object_t object);
 
-#if     TASK_SWAPPER
-
-__private_extern__ void vm_object_res_reference(
-	vm_object_t             object);
-__private_extern__ void vm_object_res_deallocate(
-	vm_object_t             object);
-#define VM_OBJ_RES_INCR(object) (object)->res_count++
-#define VM_OBJ_RES_DECR(object) (object)->res_count--
-
-#else   /* TASK_SWAPPER */
-
-#define VM_OBJ_RES_INCR(object)
-#define VM_OBJ_RES_DECR(object)
-#define vm_object_res_reference(object)
-#define vm_object_res_deallocate(object)
-
-#endif  /* TASK_SWAPPER */
+__private_extern__ void vm_object_set_size(
+	vm_object_t             object,
+	vm_object_size_t        outer_size,
+	vm_object_size_t        inner_size);
 
 #define vm_object_reference_locked(object)              \
 	MACRO_BEGIN                                     \
@@ -633,19 +596,16 @@ __private_extern__ void vm_object_res_deallocate(
 	assert((RLObject)->ref_count > 0);              \
 	(RLObject)->ref_count++;                        \
 	assert((RLObject)->ref_count > 1);              \
-	vm_object_res_reference(RLObject);              \
 	MACRO_END
 
 
-#define vm_object_reference_shared(object)                              \
-	MACRO_BEGIN                                                     \
-	vm_object_t RLObject = (object);                                \
-	vm_object_lock_assert_shared(object);                           \
-	assert((RLObject)->ref_count > 0);                              \
+#define vm_object_reference_shared(object)              \
+	MACRO_BEGIN                                     \
+	vm_object_t RLObject = (object);                \
+	vm_object_lock_assert_shared(object);           \
+	assert((RLObject)->ref_count > 0);              \
 	OSAddAtomic(1, &(RLObject)->ref_count);         \
-	assert((RLObject)->ref_count > 0);                              \
-	/* XXX we would need an atomic version of the following ... */  \
-	vm_object_res_reference(RLObject);                              \
+	assert((RLObject)->ref_count > 0);              \
 	MACRO_END
 
 
@@ -669,15 +629,12 @@ MACRO_END
 __private_extern__ void         vm_object_deallocate(
 	vm_object_t     object);
 
-__private_extern__ kern_return_t vm_object_release_name(
-	vm_object_t     object,
-	int             flags);
-
 __private_extern__ void         vm_object_pmap_protect(
 	vm_object_t             object,
 	vm_object_offset_t      offset,
 	vm_object_size_t        size,
 	pmap_t                  pmap,
+	vm_map_size_t           pmap_page_size,
 	vm_map_offset_t         pmap_start,
 	vm_prot_t               prot);
 
@@ -686,6 +643,7 @@ __private_extern__ void         vm_object_pmap_protect_options(
 	vm_object_offset_t      offset,
 	vm_object_size_t        size,
 	pmap_t                  pmap,
+	vm_map_size_t           pmap_page_size,
 	vm_map_offset_t         pmap_start,
 	vm_prot_t               prot,
 	int                     options);
@@ -701,7 +659,9 @@ __private_extern__ void         vm_object_deactivate_pages(
 	vm_object_size_t        size,
 	boolean_t               kill_page,
 	boolean_t               reusable_page,
+	boolean_t               reusable_no_write,
 	struct pmap             *pmap,
+/* XXX TODO4K: need pmap_page_size here too? */
 	vm_map_offset_t         pmap_offset);
 
 __private_extern__ void vm_object_reuse_pages(
@@ -737,7 +697,8 @@ __private_extern__ boolean_t    vm_object_coalesce(
 __private_extern__ boolean_t    vm_object_shadow(
 	vm_object_t             *object,
 	vm_object_offset_t      *offset,
-	vm_object_size_t        length);
+	vm_object_size_t        length,
+	boolean_t               always_shadow);
 
 __private_extern__ void         vm_object_collapse(
 	vm_object_t             object,
@@ -745,7 +706,7 @@ __private_extern__ void         vm_object_collapse(
 	boolean_t               can_bypass);
 
 __private_extern__ boolean_t    vm_object_copy_quickly(
-	vm_object_t             *_object,
+	vm_object_t             object,
 	vm_object_offset_t      src_offset,
 	vm_object_size_t        size,
 	boolean_t               *_src_needs_copy,
@@ -944,7 +905,7 @@ vm_object_assert_wait(
 	assert(event >= 0 && event <= VM_OBJECT_EVENT_MAX);
 
 	object->all_wanted |= 1 << event;
-	wr = assert_wait((event_t)((vm_offset_t)object + event),
+	wr = assert_wait((event_t)((vm_offset_t)object + (vm_offset_t)event),
 	    interruptible);
 	return wr;
 }
@@ -971,19 +932,10 @@ thread_sleep_vm_object(
 {
 	wait_result_t wr;
 
-#if DEVELOPMENT || DEBUG
-	if (object->Lock_owner != current_thread()) {
-		panic("thread_sleep_vm_object: now owner - %p\n", object);
-	}
-	object->Lock_owner = 0;
-#endif
 	wr = lck_rw_sleep(&object->Lock,
 	    LCK_SLEEP_PROMOTED_PRI,
 	    event,
 	    interruptible);
-#if DEVELOPMENT || DEBUG
-	object->Lock_owner = current_thread();
-#endif
 	return wr;
 }
 
@@ -1000,7 +952,7 @@ vm_object_sleep(
 
 	object->all_wanted |= 1 << event;
 	wr = thread_sleep_vm_object(object,
-	    (event_t)((vm_offset_t)object + event),
+	    (event_t)((vm_offset_t)object + (vm_offset_t)event),
 	    interruptible);
 	return wr;
 }
@@ -1014,7 +966,7 @@ vm_object_wakeup(
 	assert(event >= 0 && event <= VM_OBJECT_EVENT_MAX);
 
 	if (object->all_wanted & (1 << event)) {
-		thread_wakeup((event_t)((vm_offset_t)object + event));
+		thread_wakeup((event_t)((vm_offset_t)object + (vm_offset_t)event));
 	}
 	object->all_wanted &= ~(1 << event);
 }
@@ -1181,8 +1133,10 @@ extern void     vm_object_cache_remove(vm_object_t);
 extern int      vm_object_cache_evict(int, int);
 
 #define VM_OBJECT_OWNER_DISOWNED ((task_t) -1)
+#define VM_OBJECT_OWNER_UNCHANGED ((task_t) -2)
 #define VM_OBJECT_OWNER(object)                                         \
-	((((object)->purgable == VM_PURGABLE_DENY &&                    \
+	((object == VM_OBJECT_NULL ||                                   \
+	  ((object)->purgable == VM_PURGABLE_DENY &&                    \
 	   (object)->vo_ledger_tag == 0) ||                             \
 	  (object)->vo_owner == TASK_NULL)                              \
 	 ? TASK_NULL    /* not owned */                                 \
@@ -1203,5 +1157,10 @@ extern kern_return_t vm_object_ownership_change(
 	task_t new_owner,
 	int new_ledger_flags,
 	boolean_t task_objq_locked);
+
+// LP64todo: all the current tools are 32bit, obviously never worked for 64b
+// so probably should be a real 32b ID vs. ptr.
+// Current users just check for equality
+#define VM_OBJECT_ID(o) ((uint32_t)(uintptr_t)VM_KERNEL_ADDRPERM((o)))
 
 #endif  /* _VM_VM_OBJECT_H_ */

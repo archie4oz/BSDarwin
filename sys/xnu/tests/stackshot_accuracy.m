@@ -12,6 +12,9 @@
 
 T_GLOBAL_META(
 		T_META_NAMESPACE("xnu.stackshot.accuracy"),
+		T_META_RADAR_COMPONENT_NAME("xnu"),
+		T_META_RADAR_COMPONENT_VERSION("stackshot"),
+		T_META_OWNER("jonathan_w_adams"),
 		T_META_CHECK_LEAKS(false),
 		T_META_ASROOT(true)
 		);
@@ -82,11 +85,11 @@ kill_children(void)
 }
 
 static void *
-take_stackshot(pid_t target_pid, uint32_t extra_flags, uint64_t since_timestamp)
+take_stackshot(pid_t target_pid, uint64_t extra_flags, uint64_t since_timestamp)
 {
 	void *stackshot_config;
 	int err, retries = 5;
-	uint32_t stackshot_flags = STACKSHOT_KCDATA_FORMAT |
+	uint64_t stackshot_flags = STACKSHOT_KCDATA_FORMAT |
 								STACKSHOT_THREAD_WAITINFO |
 								STACKSHOT_GET_DQ;
 

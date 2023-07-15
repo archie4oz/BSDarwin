@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012 Apple Inc. All rights reserved.
+ * Copyright (c) 2012-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -30,7 +30,6 @@
 #include <mach/kern_return.h>
 #include <mach/thread_status.h>
 #include <kern/thread.h>
-#include <kern/kalloc.h>
 #include <arm/vmparam.h>
 #include <arm/cpu_data_internal.h>
 
@@ -69,8 +68,6 @@ thread_state32_to_saved_state(const arm_thread_state32_t *ts32, arm_saved_state_
 
 #if defined(__arm64__)
 	set_saved_state_cpsr(saved_state, (ts32->cpsr & ~PSR64_MODE_MASK) | PSR64_MODE_RW_32);
-#elif defined(__arm__)
-	set_saved_state_cpsr(saved_state, (ts32->cpsr & ~PSR_USER_MASK) | (ts32->cpsr & PSR_USER_MASK));
 #else
 #error Unknown architecture.
 #endif

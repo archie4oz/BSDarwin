@@ -156,11 +156,13 @@ LEAF(pseudo, 0)					;\
 
 #define __SYSCALL2(pseudo, name, nargs, cerror) \
 	PSEUDO(pseudo, name, nargs, cerror)			;\
-	ret
+	ret											;\
+	UNWIND_EPILOGUE
 
 #define __SYSCALL(pseudo, name, nargs)			\
 	PSEUDO(pseudo, name, nargs, cerror)			;\
-	ret
+	ret											;\
+	UNWIND_EPILOGUE
 
 #elif defined(__arm__)
 
@@ -334,6 +336,9 @@ name:
 #elif __SYSCALL_32BIT_ARG_BYTES == 36 
 #define SYSCALL(name, nargs, cerror)		SYSCALL_8(name, cerror)
 #define SYSCALL_NONAME(name, nargs, cerror)	SYSCALL_NONAME_8(name, cerror)
+#elif __SYSCALL_32BIT_ARG_BYTES == 40 
+#define SYSCALL(name, nargs, cerror)		SYSCALL_8(name, cerror)
+#define SYSCALL_NONAME(name, nargs, cerror)	SYSCALL_NONAME_8(name, cerror)
 #elif __SYSCALL_32BIT_ARG_BYTES == 44 
 #define SYSCALL(name, nargs, cerror)		SYSCALL_8(name, cerror)
 #define SYSCALL_NONAME(name, nargs, cerror)	SYSCALL_NONAME_8(name, cerror)
@@ -443,15 +448,16 @@ pseudo:									;\
  * TBD
  */
 
-#define DO_SYSCALL(num, cerror)	\
-   mov   x16, #(num)    %%\
-   svc   #SWI_SYSCALL	%%\
-   b.cc  2f             %%\
-   PUSH_FRAME			%%\
-   bl    _##cerror		%%\
-   POP_FRAME			%%\
-   ret					%%\
-2:			
+#define DO_SYSCALL(num, cerror)                 \
+	mov   x16, #(num)                     %%\
+	svc   #SWI_SYSCALL                    %%\
+	b.cc  2f                              %%\
+	ARM64_STACK_PROLOG                    %%\
+	PUSH_FRAME                            %%\
+	bl    _##cerror                       %%\
+	POP_FRAME                             %%\
+	ARM64_STACK_EPILOG                    %%\
+2:
 
 #define MI_GET_ADDRESS(reg,var)  \
    adrp	reg, var@page      %%\

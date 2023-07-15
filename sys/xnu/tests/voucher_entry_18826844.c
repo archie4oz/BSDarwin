@@ -10,7 +10,11 @@
 #include <mach/mach.h>
 #include <darwintest.h>
 
-T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true));
+T_GLOBAL_META(
+	T_META_NAMESPACE("xnu.ipc"),
+	T_META_RUN_CONCURRENTLY(TRUE),
+	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("IPC"));
 
 T_DECL(voucher_entry, "voucher_entry", T_META_CHECK_LEAKS(false), T_META_ALL_VALID_ARCHS(true))
 {
@@ -54,7 +58,8 @@ T_DECL(voucher_entry, "voucher_entry", T_META_CHECK_LEAKS(false), T_META_ALL_VAL
 		.msgh_size          = sizeof(request_msg_1),
 	};
 
-	kr = mach_msg_send(&request_msg_1);
+	kr = mach_msg2(&request_msg_1, MACH64_SEND_MSG | MACH64_SEND_KOBJECT_CALL,
+	    request_msg_1, request_msg_1.msgh_size, 0, MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, 0);
 
 	T_ASSERT_MACH_ERROR(MACH_SEND_INVALID_DEST, kr, "send with two moves should fail with invalid dest");
 
@@ -69,7 +74,8 @@ T_DECL(voucher_entry, "voucher_entry", T_META_CHECK_LEAKS(false), T_META_ALL_VAL
 	};
 
 	/* panic happens here */
-	kr = mach_msg_send(&request_msg_2);
+	kr = mach_msg2(&request_msg_2, MACH64_SEND_MSG | MACH64_SEND_KOBJECT_CALL,
+	    request_msg_2, request_msg_2.msgh_size, 0, MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, 0);
 
 	T_ASSERT_MACH_SUCCESS(kr, "send with move and copy succeeds");
 

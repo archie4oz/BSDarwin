@@ -55,6 +55,8 @@ extern kern_return_t                    cpu_signal_deferred(
 extern void                     cpu_signal_cancel(
 	cpu_data_t              *target);
 
+extern bool cpu_has_SIGPdebug_pending(void);
+
 #define SIGPnop                 0x00000000U             /* Send IPI with no service */
 #define SIGPdec                 0x00000001U             /* Request decremeter service */
 /* 0x2U unused */
@@ -63,7 +65,7 @@ extern void                     cpu_signal_cancel(
 #define SIGPdebug               0x00000010U             /* Request Debug call */
 #define SIGPLWFlush             0x00000020UL            /* Request LWFlush call */
 #define SIGPLWClean             0x00000040UL            /* Request LWClean call */
-#define SIGPkptimer             0x00000100U             /* Request kperf timer */
+#define SIGPkppet               0x00000100U             /* Request kperf PET handler */
 #define SIGPxcallImm            0x00000200U             /* Send a cross-call, fail if already pending */
 
 #define SIGPdisabled            0x80000000U             /* Signal disabled */
@@ -75,9 +77,10 @@ extern void arm64_ipi_test(void);
 #endif /* defined(CONFIG_XNUPOST) && __arm64__ */
 
 #if defined(KERNEL_INTEGRITY_CTRR)
-extern void init_ctrr_cpu_start_lock(void);
+extern void init_ctrr_cluster_states(void);
 extern lck_spin_t ctrr_cpu_start_lck;
-extern bool ctrr_cluster_locked[__ARM_CLUSTER_COUNT__];
+enum ctrr_cluster_states { CTRR_UNLOCKED = 0, CTRR_LOCKING, CTRR_LOCKED };
+extern enum ctrr_cluster_states ctrr_cluster_locked[MAX_CPU_CLUSTERS];
 #endif /* defined(KERNEL_INTEGRITY_CTRR) */
 
 #endif  /* _ARM_CPU_INTERNAL_H_ */

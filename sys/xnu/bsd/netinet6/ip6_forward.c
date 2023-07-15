@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009-2018 Apple Inc. All rights reserved.
+ * Copyright (c) 2009-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -90,9 +90,7 @@
 
 #if IPSEC
 #include <netinet6/ipsec.h>
-#if INET6
 #include <netinet6/ipsec6.h>
-#endif
 #include <netkey/key.h>
 extern int ipsec_bypass;
 #endif /* IPSEC */
@@ -100,12 +98,31 @@ extern int ipsec_bypass;
 #include <net/net_osdep.h>
 
 #if DUMMYNET
-#include <netinet/ip_fw.h>
 #include <netinet/ip_dummynet.h>
 #endif /* DUMMYNET */
 
 #if PF
 #include <net/pfvar.h>
+static void
+adjust_scope_and_pktlen(struct mbuf *m,
+    unsigned int *ifscope_p, uint32_t *mpktlen_p)
+{
+	struct pf_mtag *pf_mtag;
+	struct pf_fragment_tag *pf_ftagp;
+
+	pf_mtag = pf_find_mtag(m);
+	ASSERT(pf_mtag != NULL);
+	if (pf_mtag->pftag_rtableid != IFSCOPE_NONE) {
+		*ifscope_p = pf_mtag->pftag_rtableid;
+	}
+	pf_ftagp = pf_find_fragment_tag(m);
+	if (pf_ftagp != NULL) {
+		ASSERT(pf_mtag->pftag_flags & PF_TAG_REASSEMBLED);
+		*mpktlen_p = pf_ftagp->ft_maxlen;
+		ASSERT(*mpktlen_p);
+	}
+}
+
 #endif /* PF */
 
 /*
@@ -139,11 +156,6 @@ ip6_forward(struct mbuf *m, struct route_in6 *ip6forward_rt,
 	struct secpolicy *sp = NULL;
 #endif
 	unsigned int ifscope = IFSCOPE_NONE;
-#if PF
-	struct pf_mtag *pf_mtag;
-	struct pf_fragment_tag *pf_ftagp, pf_ftag;
-	boolean_t pf_ftag_valid = FALSE;
-#endif /* PF */
 	uint32_t mpktlen = 0;
 
 	/*
@@ -166,24 +178,8 @@ ip6_forward(struct mbuf *m, struct route_in6 *ip6forward_rt,
 	}
 
 #if PF
-	pf_mtag = pf_find_mtag(m);
-	/*
-	 * save the PF fragmentation metadata as m_copy() removes the
-	 * mbufs tags from the original mbuf.
-	 */
-	pf_ftagp = pf_find_fragment_tag(m);
-	if (pf_ftagp != NULL) {
-		ASSERT(pf_mtag->pftag_flags & PF_TAG_REASSEMBLED);
-		pf_ftag = *pf_ftagp;
-		pf_ftag_valid = TRUE;
-		mpktlen = pf_ftag.ft_maxlen;
-		ASSERT(mpktlen);
-	}
-	if (pf_mtag != NULL && pf_mtag->pftag_rtableid != IFSCOPE_NONE) {
-		ifscope = pf_mtag->pftag_rtableid;
-	}
-	pf_mtag = NULL;
-	pf_ftagp = NULL;
+	adjust_scope_and_pktlen(m, &ifscope, &mpktlen);
+
 	/*
 	 * If the caller provides a route which is on a different interface
 	 * than the one specified for scoped forwarding, discard the route
@@ -279,8 +275,8 @@ ip6_forward(struct mbuf *m, struct route_in6 *ip6forward_rt,
 	 * It is important to save it before IPsec processing as IPsec
 	 * processing may modify the mbuf.
 	 */
-	mcopy = m_copy(m, 0, imin(m->m_pkthdr.len, ICMPV6_PLD_MAXLEN));
-
+	mcopy = m_copym_mode(m, 0, imin(m->m_pkthdr.len, ICMPV6_PLD_MAXLEN),
+	    M_DONTWAIT, M_COPYM_COPY_HDR);
 #if IPSEC
 	if (ipsec_bypass != 0) {
 		goto skip_ipsec;
@@ -393,7 +389,7 @@ ip6_forward(struct mbuf *m, struct route_in6 *ip6forward_rt,
 				break;
 			default:
 				printf("ip6_output (ipsec): error code %d\n", error);
-			/* fall through */
+				OS_FALLTHROUGH;
 			case ENOENT:
 				/* don't show these error codes to the user */
 				break;
@@ -455,7 +451,7 @@ skip_ipsec:
 		}
 		RT_LOCK_ASSERT_HELD(rt);
 	} else if (ROUTE_UNUSABLE(ip6forward_rt) ||
-	    !IN6_ARE_ADDR_EQUAL(&ip6->ip6_dst, &dst->sin6_addr)) {
+	    !in6_are_addr_equal_scoped(&ip6->ip6_dst, &dst->sin6_addr, ip6_input_getdstifscope(m), dst->sin6_scope_id)) {
 		if (rt != NULL) {
 			/* Release extra ref */
 			RT_REMREF_LOCKED(rt);
@@ -729,14 +725,12 @@ skip_ipsec:
 		 * rules, in which case it will set the PF_TAG_REFRAGMENTED
 		 * flag in PF mbuf tag.
 		 */
-		if (pf_ftag_valid) {
-			pf_copy_fragment_tag(m, &pf_ftag, M_DONTWAIT);
-		}
 #if DUMMYNET
 		struct ip_fw_args args;
+		struct pf_mtag *pf_mtag;
+
 		bzero(&args, sizeof(args));
 
-		args.fwa_m = m;
 		args.fwa_oif = ifp;
 		args.fwa_oflags = 0;
 		args.fwa_ro6 = ip6forward_rt;
@@ -751,7 +745,7 @@ skip_ipsec:
 #endif /* !DUMMYNET */
 		if (error != 0 || m == NULL) {
 			if (m != NULL) {
-				panic("%s: unexpected packet %p\n", __func__, m);
+				panic("%s: unexpected packet %p", __func__, m);
 				/* NOTREACHED */
 			}
 			/* Already freed by callee */

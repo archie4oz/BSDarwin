@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -95,8 +95,10 @@
 #include <sys/appleapiopts.h>
 
 #ifdef BSD_KERNEL_PRIVATE
+#include <kern/zalloc.h>
 #include <net/ethernet.h>
 
+struct ip6asfrag;
 /*
  * IP6 reassembly queue structure.  Each fragment
  * being reassembled is attached to one of these structures.
@@ -112,25 +114,13 @@ struct  ip6q {
 	struct ip6q     *ip6q_next;
 	struct ip6q     *ip6q_prev;
 	int             ip6q_unfrglen;  /* len of unfragmentable part */
-#ifdef notyet
-	u_char  *ip6q_nxtp;
-#endif
 	int             ip6q_nfrag;     /* # of fragments */
 	uint32_t        ip6q_csum_flags; /* checksum flags */
 	uint32_t        ip6q_csum;      /* partial checksum value */
+	uint32_t        ip6q_flags;
+	uint32_t        ip6q_dst_ifscope, ip6q_src_ifscope;
+#define IP6QF_DIRTY    0x00000001
 };
-
-struct  ip6asfrag {
-	struct ip6asfrag *ip6af_down;
-	struct ip6asfrag *ip6af_up;
-	struct mbuf     *ip6af_m;
-	int             ip6af_offset;   /* offset in ip6af_m to next header */
-	int             ip6af_frglen;   /* fragmentable part length */
-	int             ip6af_off;      /* fragment offset */
-	u_int16_t       ip6af_mff;      /* more fragment bit in frag off */
-};
-
-#define IP6_REASS_MBUF(ip6af) (*(struct mbuf **)&((ip6af)->ip6af_m))
 
 struct  ip6_moptions {
 	decl_lck_mtx_data(, im6o_lock);
@@ -366,13 +356,15 @@ struct  ip6stat {
 	u_quad_t ip6s_clat464_plat64_pfx_setfail;
 	u_quad_t ip6s_clat464_plat64_pfx_getfail;
 
+	u_quad_t ip6s_overlap_frag_drop;
+
 	u_quad_t ip6s_rcv_if_weak_match;
 	u_quad_t ip6s_rcv_if_no_match;
 };
 
 enum ip6s_sources_rule_index {
 	IP6S_SRCRULE_0, IP6S_SRCRULE_1, IP6S_SRCRULE_2, IP6S_SRCRULE_3, IP6S_SRCRULE_4,
-	IP6S_SRCRULE_5, IP6S_SRCRULE_6, IP6S_SRCRULE_7,
+	IP6S_SRCRULE_5, IP6S_SRCRULE_5_5, IP6S_SRCRULE_6, IP6S_SRCRULE_7,
 	IP6S_SRCRULE_7x, IP6S_SRCRULE_8
 };
 
@@ -453,11 +445,15 @@ struct ip6_out_args {
 #define IP6OAF_NO_LOW_POWER     0x00000200      /* skip low power */
 #define IP6OAF_NO_CONSTRAINED   0x00000400      /* skip IFXF_CONSTRAINED */
 #define IP6OAF_SKIP_PF          0x00000800      /* skip PF */
-	u_int32_t       ip6oa_retflags; /* IP6OARF return flags (see below) */
-#define IP6OARF_IFDENIED        0x00000001      /* denied access to interface */
+#define IP6OAF_DONT_FRAG        0x00001000      /* Don't fragment */
+#define IP6OAF_REDO_QOSMARKING_POLICY   0x00002000      /* Re-evaluate QOS marking policy */
+#define IP6OAF_R_IFDENIED        0x00004000      /* return flag: denied access to interface */
 	int             ip6oa_sotc;             /* traffic class for Fastlane DSCP mapping */
 	int             ip6oa_netsvctype;
+	int32_t         qos_marking_gencount;
 };
+
+#define IP6OAF_RET_MASK (IP6OAF_R_IFDENIED)
 
 extern struct ip6stat ip6stat;  /* statistics */
 extern int ip6_defhlim;         /* default hop limit */
@@ -494,12 +490,18 @@ extern int ip6_lowportmin;              /* minimum reserved port */
 extern int ip6_lowportmax;              /* maximum reserved port */
 
 extern int ip6_use_tempaddr; /* whether to use temporary addresses. */
+extern int ip6_ula_use_tempaddr; /* whether to use temporary ULA addresses */
 
 /* whether to prefer temporary addresses in the source address selection */
 extern int ip6_prefer_tempaddr;
 
 /* whether to use the default scope zone when unspecified */
 extern int ip6_use_defzone;
+
+/* how many times to try allocating cga address after conflict */
+extern int ip6_cga_conflict_retries;
+#define IPV6_CGA_CONFLICT_RETRIES_DEFAULT 3
+#define IPV6_CGA_CONFLICT_RETRIES_MAX     10
 
 extern struct pr_usrreqs rip6_usrreqs;
 extern struct pr_usrreqs icmp6_dgram_usrreqs;
@@ -523,15 +525,22 @@ extern void ip6_setsrcifaddr_info(struct mbuf *, uint32_t, struct in6_ifaddr *);
 extern void ip6_setdstifaddr_info(struct mbuf *, uint32_t, struct in6_ifaddr *);
 extern int ip6_getsrcifaddr_info(struct mbuf *, uint32_t *, uint32_t *);
 extern int ip6_getdstifaddr_info(struct mbuf *, uint32_t *, uint32_t *);
+extern uint32_t ip6_input_getsrcifscope(struct mbuf *);
+extern uint32_t ip6_input_getdstifscope(struct mbuf *);
+extern void ip6_output_setsrcifscope(struct mbuf *, uint32_t, struct in6_ifaddr *);
+extern void ip6_output_setdstifscope(struct mbuf *, uint32_t, struct in6_ifaddr *);
+extern uint32_t ip6_output_getsrcifscope(struct mbuf *);
+extern uint32_t ip6_output_getdstifscope(struct mbuf *);
+
 extern void ip6_freepcbopts(struct ip6_pktopts *);
-extern int ip6_unknown_opt(u_int8_t *, struct mbuf *, int);
+extern int ip6_unknown_opt(u_int8_t *, struct mbuf *, size_t);
 extern char *ip6_get_prevhdr(struct mbuf *, int);
 extern int ip6_nexthdr(struct mbuf *, int, int, int *);
 extern int ip6_lasthdr(struct mbuf *, int, int, int *);
 extern boolean_t ip6_pkt_has_ulp(struct mbuf *m);
 
 extern void ip6_moptions_init(void);
-extern struct ip6_moptions *ip6_allocmoptions(int);
+extern struct ip6_moptions *ip6_allocmoptions(zalloc_flags_t);
 extern void im6o_addref(struct ip6_moptions *, int);
 extern void im6o_remref(struct ip6_moptions *);
 
@@ -558,7 +567,7 @@ extern int ip6_raw_ctloutput(struct socket *, struct sockopt *);
 extern void ip6_initpktopts(struct ip6_pktopts *);
 extern int ip6_setpktoptions(struct mbuf *, struct ip6_pktopts *, int, int);
 extern void ip6_clearpktopts(struct ip6_pktopts *, int);
-extern struct ip6_pktopts *ip6_copypktopts(struct ip6_pktopts *, int);
+extern struct ip6_pktopts *ip6_copypktopts(struct ip6_pktopts *, zalloc_flags_t);
 extern int ip6_optlen(struct inpcb *);
 extern void ip6_drain(void);
 extern int ip6_do_fragmentation(struct mbuf **, uint32_t, struct ifnet *, uint32_t,
@@ -585,7 +594,7 @@ extern int dest6_input(struct mbuf **, int *, int);
 extern struct ifaddr * in6_selectsrc_core_ifa(struct sockaddr_in6 *, struct ifnet *, int);
 extern struct in6_addr * in6_selectsrc_core(struct sockaddr_in6 *,
     uint32_t, struct ifnet *, int,
-    struct in6_addr *, struct ifnet **, int *, struct ifaddr **);
+    struct in6_addr *, struct ifnet **, int *, struct ifaddr **, struct route_in6 *);
 extern struct in6_addr *in6_selectsrc(struct sockaddr_in6 *,
     struct ip6_pktopts *, struct inpcb *, struct route_in6 *,
     struct ifnet **, struct in6_addr *, unsigned int, int *);

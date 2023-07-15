@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2007-2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2007-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -93,6 +93,10 @@ extern "C" {
 #include <sys/systm.h>
 #include <net/pf_pbuf.h>
 
+#if SKYWALK
+#include <netinet/in_pcb.h>
+#include <skywalk/namespace/netns.h>
+#endif
 
 #if BYTE_ORDER == BIG_ENDIAN
 #define htobe64(x)      (x)
@@ -102,8 +106,8 @@ extern "C" {
 
 #define be64toh(x)      htobe64(x)
 
-extern lck_rw_t *pf_perim_lock;
-extern lck_mtx_t *pf_lock;
+extern lck_rw_t pf_perim_lock;
+extern lck_mtx_t pf_lock;
 
 struct pool {
 	struct zone     *pool_zone;     /* pointer to backend zone */
@@ -305,7 +309,7 @@ struct pfi_dynaddr {
 	struct pfr_ktable               *pfid_kt;
 	struct pfi_kif                  *pfid_kif;
 	void                            *pfid_hook_cookie;
-	int                              pfid_net;      /* mask or 128 */
+	uint8_t                          pfid_net;      /* mask or 128 */
 	int                              pfid_acnt4;    /* address count IPv4 */
 	int                              pfid_acnt6;    /* address count IPv6 */
 	sa_family_t                      pfid_af;       /* rule af */
@@ -317,21 +321,14 @@ struct pfi_dynaddr {
  */
 
 #if INET
-#if !INET6
-#define PF_INET_ONLY
-#endif /* ! INET6 */
 #endif /* INET */
 
-#if INET6
 #if !INET
 #define PF_INET6_ONLY
 #endif /* ! INET */
-#endif /* INET6 */
 
 #if INET
-#if INET6
 #define PF_INET_INET6
-#endif /* INET6 */
 #endif /* INET */
 
 #else /* !KERNEL */
@@ -854,6 +851,10 @@ struct pf_rule {
 
 #define PFAPPSTATE_HIWAT        10000   /* default same as state table */
 
+/* PF reserved special purpose tags */
+#define PF_TAG_NAME_SYSTEM_SERVICE    "com.apple.pf.system_service_tag"
+#define PF_TAG_NAME_STACK_DROP        "com.apple.pf.stack_drop_tag"
+
 enum pf_extmap {
 	PF_EXTMAP_APD   = 1,    /* Address-port-dependent mapping */
 	PF_EXTMAP_AD,           /* Address-dependent mapping */
@@ -1062,6 +1063,9 @@ struct pf_state {
 	u_int8_t                 allow_opts;
 	u_int8_t                 timeout;
 	u_int8_t                 sync_flags;
+#if SKYWALK
+	netns_token              nstoken;
+#endif
 };
 #endif /* KERNEL */
 
@@ -1201,6 +1205,7 @@ struct pf_ruleset {
 			struct pf_rulequeue     *ptr;
 			struct pf_rule          **ptr_array;
 			u_int32_t                rcount;
+			u_int32_t                rsize;
 			u_int32_t                ticket;
 			int                      open;
 		}                        active, inactive;
@@ -1250,8 +1255,8 @@ RB_PROTOTYPE(pf_anchor_node, pf_anchor, entry_node, pf_anchor_compare);
 struct pfr_table {
 	char                     pfrt_anchor[MAXPATHLEN];
 	char                     pfrt_name[PF_TABLE_NAME_SIZE];
-	u_int32_t                pfrt_flags;
-	u_int8_t                 pfrt_fback;
+	uint32_t                 pfrt_flags;
+	uint8_t                  pfrt_fback;
 };
 
 enum { PFR_FB_NONE, PFR_FB_MATCH, PFR_FB_ADDED, PFR_FB_DELETED,
@@ -1263,10 +1268,10 @@ struct pfr_addr {
 		struct in_addr   _pfra_ip4addr;
 		struct in6_addr  _pfra_ip6addr;
 	}                pfra_u;
-	u_int8_t         pfra_af;
-	u_int8_t         pfra_net;
-	u_int8_t         pfra_not;
-	u_int8_t         pfra_fback;
+	uint8_t          pfra_af;
+	uint8_t          pfra_net;
+	uint8_t          pfra_not;
+	uint8_t          pfra_fback;
 };
 #define pfra_ip4addr    pfra_u._pfra_ip4addr
 #define pfra_ip6addr    pfra_u._pfra_ip6addr
@@ -1278,11 +1283,11 @@ enum { PFR_OP_BLOCK, PFR_OP_PASS, PFR_OP_ADDR_MAX, PFR_OP_TABLE_MAX };
 struct pfr_astats {
 	struct pfr_addr  pfras_a;
 #if !defined(__LP64__)
-	u_int32_t        _pad;
+	uint32_t         _pad;
 #endif /* !__LP64__ */
-	u_int64_t        pfras_packets[PFR_DIR_MAX][PFR_OP_ADDR_MAX];
-	u_int64_t        pfras_bytes[PFR_DIR_MAX][PFR_OP_ADDR_MAX];
-	u_int64_t        pfras_tzero;
+	uint64_t         pfras_packets[PFR_DIR_MAX][PFR_OP_ADDR_MAX];
+	uint64_t         pfras_bytes[PFR_DIR_MAX][PFR_OP_ADDR_MAX];
+	uint64_t         pfras_tzero;
 };
 
 enum { PFR_REFCNT_RULE, PFR_REFCNT_ANCHOR, PFR_REFCNT_MAX };
@@ -1360,11 +1365,6 @@ RB_HEAD(pfi_ifhead, pfi_kif);
 extern struct pf_state_tree_lan_ext      pf_statetbl_lan_ext;
 extern struct pf_state_tree_ext_gwy      pf_statetbl_ext_gwy;
 
-/* keep synced with pfi_kif, used in RB_FIND */
-struct pfi_kif_cmp {
-	char                             pfik_name[IFNAMSIZ];
-};
-
 struct pfi_kif {
 	char                             pfik_name[IFNAMSIZ];
 	RB_ENTRY(pfi_kif)                pfik_tree;
@@ -1416,9 +1416,7 @@ struct pf_pdesc {
 		struct tcphdr           *tcp;
 		struct udphdr           *udp;
 		struct icmp             *icmp;
-#if INET6
 		struct icmp6_hdr        *icmp6;
-#endif /* INET6 */
 		struct pf_grev1_hdr     *grev1;
 		struct pf_esp_hdr       *esp;
 		void                    *any;
@@ -1479,7 +1477,8 @@ struct pf_pdesc {
 #define PFRES_SRCLIMIT  13              /* Source node/conn limit */
 #define PFRES_SYNPROXY  14              /* SYN proxy */
 #define PFRES_DUMMYNET  15              /* Dummynet */
-#define PFRES_MAX       16              /* total+1 */
+#define PFRES_INVPORT   16              /* Invalid TCP/UDP port */
+#define PFRES_MAX       17              /* total+1 */
 
 #define PFRES_NAMES { \
 	"match", \
@@ -1498,6 +1497,7 @@ struct pf_pdesc {
 	"src-limit", \
 	"synproxy", \
 	"dummynet", \
+	"invalid-port", \
 	NULL \
 }
 
@@ -1632,11 +1632,6 @@ struct priq_opts {
 	u_int32_t       flags;
 };
 
-struct qfq_opts {
-	u_int32_t       flags;
-	u_int32_t       lmax;
-};
-
 struct hfsc_opts {
 	/* real-time service curve */
 	u_int64_t       rtsc_m1;        /* slope of the 1st segment in bps */
@@ -1721,7 +1716,6 @@ struct pf_altq {
 		struct priq_opts         priq_opts;
 		struct hfsc_opts         hfsc_opts;
 		struct fairq_opts        fairq_opts;
-		struct qfq_opts          qfq_opts;
 	} pq_u;
 
 	u_int32_t                qid;           /* return value */
@@ -2213,15 +2207,10 @@ struct ip_fw_args;
 extern boolean_t is_nlc_enabled_glb;
 
 #if INET
-__private_extern__ int pf_test(int, struct ifnet *, pbuf_t **,
-    struct ether_header *, struct ip_fw_args *);
 __private_extern__ int pf_test_mbuf(int, struct ifnet *, struct mbuf **,
     struct ether_header *, struct ip_fw_args *);
 #endif /* INET */
 
-#if INET6
-__private_extern__ int pf_test6(int, struct ifnet *, pbuf_t **,
-    struct ether_header *, struct ip_fw_args *);
 __private_extern__ int pf_test6_mbuf(int, struct ifnet *, struct mbuf **,
     struct ether_header *, struct ip_fw_args *);
 __private_extern__ void pf_poolmask(struct pf_addr *, struct pf_addr *,
@@ -2231,7 +2220,6 @@ __private_extern__ int pf_normalize_ip6(pbuf_t *, int, struct pfi_kif *,
     u_short *, struct pf_pdesc *);
 __private_extern__ int pf_refragment6(struct ifnet *, pbuf_t **,
     struct pf_fragment_tag *);
-#endif /* INET6 */
 
 __private_extern__ void *pf_lazy_makewritable(struct pf_pdesc *,
     pbuf_t *, int);
@@ -2274,6 +2262,7 @@ __private_extern__ int pf_rtlabel_match(struct pf_addr *, sa_family_t,
 __private_extern__ int pf_socket_lookup(int, struct pf_pdesc *);
 __private_extern__ struct pf_state_key *pf_alloc_state_key(struct pf_state *,
     struct pf_state_key *);
+__private_extern__ void pf_detach_state(struct pf_state *, int);
 __private_extern__ void pfr_initialize(void);
 __private_extern__ int pfr_match_addr(struct pfr_ktable *, struct pf_addr *,
     sa_family_t);
@@ -2343,7 +2332,7 @@ __private_extern__ int pfi_set_flags(const char *, int);
 __private_extern__ int pfi_clear_flags(const char *, int);
 
 __private_extern__ u_int16_t pf_tagname2tag(char *);
-__private_extern__ void pf_tag2tagname(u_int16_t, char *);
+__private_extern__ u_int16_t pf_tagname2tag_ext(char *);
 __private_extern__ void pf_tag_ref(u_int16_t);
 __private_extern__ void pf_tag_unref(u_int16_t);
 __private_extern__ int pf_tag_packet(pbuf_t *, struct pf_mtag *,
@@ -2383,7 +2372,6 @@ extern int16_t pf_nat64_configured;
 #define PF_IS_ENABLED (pf_is_enabled != 0)
 extern u_int32_t pf_hash_seed;
 
-/* these ruleset functions can be linked into userland programs (pfctl) */
 __private_extern__ int pf_get_ruleset_number(u_int8_t);
 __private_extern__ void pf_init_ruleset(struct pf_ruleset *);
 __private_extern__ int pf_anchor_setup(struct pf_rule *,
@@ -2393,6 +2381,9 @@ __private_extern__ int pf_anchor_copyout(const struct pf_ruleset *,
 __private_extern__ void pf_anchor_remove(struct pf_rule *);
 __private_extern__ void pf_remove_if_empty_ruleset(struct pf_ruleset *);
 __private_extern__ struct pf_anchor *pf_find_anchor(const char *);
+__private_extern__ int pf_reference_anchor(struct pf_anchor *a);
+__private_extern__ int pf_release_anchor(struct pf_anchor *a);
+__private_extern__ int pf_release_ruleset(struct pf_ruleset *r);
 __private_extern__ struct pf_ruleset *pf_find_ruleset(const char *);
 __private_extern__ struct pf_ruleset *pf_find_ruleset_with_owner(const char *,
     const char *, int, int *);
@@ -2417,6 +2408,13 @@ __private_extern__ struct pf_fragment_tag * pf_find_fragment_tag_pbuf(pbuf_t *);
 __private_extern__ struct pf_fragment_tag * pf_find_fragment_tag(struct mbuf *);
 __private_extern__ struct pf_fragment_tag * pf_copy_fragment_tag(struct mbuf *,
     struct pf_fragment_tag *, int);
+#if SKYWALK && defined(XNU_TARGET_OS_OSX)
+#define PF_COMPATIBLE_FLAGS_PF_ENABLED 0x00000001
+#define PF_COMPATIBLE_FLAGS_CUSTOM_ANCHORS_PRESENT 0x00000002
+#define PF_COMPATIBLE_FLAGS_CUSTOM_RULES_PRESENT 0x00000004
+
+__private_extern__ uint32_t pf_check_compatible_rules(void);
+#endif // SKYWALK && defined(XNU_TARGET_OS_OSX)
 #else /* !KERNEL */
 extern struct pf_anchor_global pf_anchors;
 extern struct pf_anchor pf_main_anchor;

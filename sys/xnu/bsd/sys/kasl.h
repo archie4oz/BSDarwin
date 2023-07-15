@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013 Apple Inc. All rights reserved.
+ * Copyright (c) 2020 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -37,10 +37,8 @@
 #endif /* BSD_KERNEL_PRIVATE */
 
 extern int
-kern_asl_msg(int level, const char *facility, int num_pairs, ...);
+kern_asl_msg(int level, const char *facility, size_t num_pairs, ...);
 
-extern int escape_str(char *str, int len, int buflen);
-extern void fpxlog_init(void);
-extern void fpxlog(int, uint32_t, uint32_t, uint32_t);
+extern int escape_str(char *str, size_t len, size_t buflen);
 
 #endif /* !_SYS_KASL_H_ */

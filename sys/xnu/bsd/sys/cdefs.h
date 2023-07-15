@@ -152,8 +152,16 @@
 #endif /* !NO_ANSI_KEYWORDS */
 #endif /* !(__STDC__ || __cplusplus) */
 
+/*
+ * __pure2 can be used for functions that are only a function of their scalar
+ * arguments (meaning they can't dereference pointers).
+ *
+ * __stateful_pure can be used for functions that have no side effects,
+ * but depend on the state of the memory.
+ */
 #define __dead2         __attribute__((__noreturn__))
 #define __pure2         __attribute__((__const__))
+#define __stateful_pure __attribute__((__pure__))
 
 /* __unused denotes variables and functions that may not be used, preventing
  * the compiler from warning about it if not used.
@@ -173,6 +181,22 @@
 #else
 #define __cold
 #endif
+
+/* __returns_nonnull marks functions that return a non-null pointer. */
+#if __has_attribute(returns_nonnull)
+#define __returns_nonnull __attribute((returns_nonnull))
+#else
+#define __returns_nonnull
+#endif
+
+/* __exported denotes symbols that should be exported even when symbols
+ * are hidden by default.
+ * __exported_push/_exported_pop are pragmas used to delimit a range of
+ *  symbols that should be exported even when symbols are hidden by default.
+ */
+#define __exported      __attribute__((__visibility__("default")))
+#define __exported_push _Pragma("GCC visibility push(default)")
+#define __exported_pop  _Pragma("GCC visibility pop")
 
 /* __deprecated causes the compiler to produce a warning when encountering
  * code using the deprecated functionality.
@@ -206,9 +230,38 @@
 #endif /* !defined(KERNEL) || defined(KERNEL_PRIVATE) */
 
 /* __unavailable causes the compiler to error out when encountering
- * code using the tagged function of variable.
+ * code using the tagged function
  */
-#define __unavailable   __attribute__((__unavailable__))
+#if __has_attribute(unavailable)
+#define __unavailable __attribute__((__unavailable__))
+#else
+#define __unavailable
+#endif
+
+#if defined(KERNEL) && !defined(KERNEL_PRIVATE)
+#define __kpi_unavailable __unavailable
+#else /* !defined(KERNEL) || defined(KERNEL_PRIVATE) */
+#define __kpi_unavailable
+#endif /* !defined(KERNEL) || defined(KERNEL_PRIVATE) */
+
+#if XNU_KERNEL_PRIVATE
+/* This macro is meant to be used for kpi deprecated to x86 3rd parties
+ * but should be marked as unavailable for arm macOS devices.
+ * XNU:                         nothing (API is still available)
+ * 1st party kexts:             __deprecated
+ * 3rd party kexts macOS x86:   __deprecated
+ * 3rd party kexts macOS arm:   __unavailable
+ */
+#define __kpi_deprecated_arm64_macos_unavailable
+#elif !KERNEL || !XNU_PLATFORM_MacOSX
+#define __kpi_deprecated_arm64_macos_unavailable
+#elif KERNEL_PRIVATE
+#define __kpi_deprecated_arm64_macos_unavailable __deprecated
+#elif defined(__arm64__)
+#define __kpi_deprecated_arm64_macos_unavailable __unavailable
+#else
+#define __kpi_deprecated_arm64_macos_unavailable __deprecated
+#endif /* XNU_KERNEL_PRIVATE */
 
 /* Delete pseudo-keywords wherever they are not available or needed. */
 #ifndef __dead
@@ -374,11 +427,13 @@
  * types.
  */
 #define __printflike(fmtarg, firstvararg) \
-	        __attribute__((__format__ (__printf__, fmtarg, firstvararg)))
+	__attribute__((__format__ (__printf__, fmtarg, firstvararg)))
 #define __printf0like(fmtarg, firstvararg) \
-	        __attribute__((__format__ (__printf0__, fmtarg, firstvararg)))
+	__attribute__((__format__ (__printf0__, fmtarg, firstvararg)))
 #define __scanflike(fmtarg, firstvararg) \
-	        __attribute__((__format__ (__scanf__, fmtarg, firstvararg)))
+	__attribute__((__format__ (__scanf__, fmtarg, firstvararg)))
+#define __osloglike(fmtarg, firstvararg) \
+	__attribute__((__format__ (__os_log__, fmtarg, firstvararg)))
 
 #define __IDSTRING(name, string) static const char name[] __used = string
 
@@ -485,84 +540,94 @@
 #define __DARWIN14_ALIAS(sym)
 #endif
 #else /* !KERNEL */
-#ifdef PLATFORM_iPhoneOS
+#ifdef XNU_PLATFORM_iPhoneOS
 /* Platform: iPhoneOS */
 #define __DARWIN_ONLY_64_BIT_INO_T      1
 #define __DARWIN_ONLY_UNIX_CONFORMANCE  1
 #define __DARWIN_ONLY_VERS_1050         1
-#endif /* PLATFORM_iPhoneOS */
-#ifdef PLATFORM_iPhoneSimulator
+#endif /* XNU_PLATFORM_iPhoneOS */
+#ifdef XNU_PLATFORM_iPhoneSimulator
 /* Platform: iPhoneSimulator */
 #define __DARWIN_ONLY_64_BIT_INO_T      1
 #define __DARWIN_ONLY_UNIX_CONFORMANCE  1
 #define __DARWIN_ONLY_VERS_1050         1
-#endif /* PLATFORM_iPhoneSimulator */
-#ifdef PLATFORM_tvOS
+#endif /* XNU_PLATFORM_iPhoneSimulator */
+#ifdef XNU_PLATFORM_tvOS
 /* Platform: tvOS */
 #define __DARWIN_ONLY_64_BIT_INO_T      1
 #define __DARWIN_ONLY_UNIX_CONFORMANCE  1
 #define __DARWIN_ONLY_VERS_1050         1
-#endif /* PLATFORM_tvOS */
-#ifdef PLATFORM_AppleTVOS
+#endif /* XNU_PLATFORM_tvOS */
+#ifdef XNU_PLATFORM_AppleTVOS
 /* Platform: AppleTVOS */
 #define __DARWIN_ONLY_64_BIT_INO_T      1
 #define __DARWIN_ONLY_UNIX_CONFORMANCE  1
 #define __DARWIN_ONLY_VERS_1050         1
-#endif /* PLATFORM_AppleTVOS */
-#ifdef PLATFORM_tvSimulator
+#endif /* XNU_PLATFORM_AppleTVOS */
+#ifdef XNU_PLATFORM_tvSimulator
 /* Platform: tvSimulator */
 #define __DARWIN_ONLY_64_BIT_INO_T      1
 #define __DARWIN_ONLY_UNIX_CONFORMANCE  1
 #define __DARWIN_ONLY_VERS_1050         1
-#endif /* PLATFORM_tvSimulator */
-#ifdef PLATFORM_AppleTVSimulator
+#endif /* XNU_PLATFORM_tvSimulator */
+#ifdef XNU_PLATFORM_AppleTVSimulator
 /* Platform: AppleTVSimulator */
 #define __DARWIN_ONLY_64_BIT_INO_T      1
 #define __DARWIN_ONLY_UNIX_CONFORMANCE  1
 #define __DARWIN_ONLY_VERS_1050         1
-#endif /* PLATFORM_AppleTVSimulator */
-#ifdef PLATFORM_iPhoneOSNano
+#endif /* XNU_PLATFORM_AppleTVSimulator */
+#ifdef XNU_PLATFORM_iPhoneOSNano
 /* Platform: iPhoneOSNano */
 #define __DARWIN_ONLY_64_BIT_INO_T      1
 #define __DARWIN_ONLY_UNIX_CONFORMANCE  1
 #define __DARWIN_ONLY_VERS_1050         1
-#endif /* PLATFORM_iPhoneOSNano */
-#ifdef PLATFORM_iPhoneNanoSimulator
+#endif /* XNU_PLATFORM_iPhoneOSNano */
+#ifdef XNU_PLATFORM_iPhoneNanoSimulator
 /* Platform: iPhoneNanoSimulator */
 #define __DARWIN_ONLY_64_BIT_INO_T      1
 #define __DARWIN_ONLY_UNIX_CONFORMANCE  1
 #define __DARWIN_ONLY_VERS_1050         1
-#endif /* PLATFORM_iPhoneNanoSimulator */
-#ifdef PLATFORM_WatchOS
+#endif /* XNU_PLATFORM_iPhoneNanoSimulator */
+#ifdef XNU_PLATFORM_WatchOS
 /* Platform: WatchOS */
 #define __DARWIN_ONLY_64_BIT_INO_T      1
 #define __DARWIN_ONLY_UNIX_CONFORMANCE  1
 #define __DARWIN_ONLY_VERS_1050         1
-#endif /* PLATFORM_WatchOS */
-#ifdef PLATFORM_WatchSimulator
+#endif /* XNU_PLATFORM_WatchOS */
+#ifdef XNU_PLATFORM_WatchSimulator
 /* Platform: WatchSimulator */
 #define __DARWIN_ONLY_64_BIT_INO_T      1
 #define __DARWIN_ONLY_UNIX_CONFORMANCE  1
 #define __DARWIN_ONLY_VERS_1050         1
-#endif /* PLATFORM_WatchSimulator */
-#ifdef PLATFORM_BridgeOS
+#endif /* XNU_PLATFORM_WatchSimulator */
+#ifdef XNU_PLATFORM_BridgeOS
 /* Platform: BridgeOS */
 #define __DARWIN_ONLY_64_BIT_INO_T      1
 #define __DARWIN_ONLY_UNIX_CONFORMANCE  1
 #define __DARWIN_ONLY_VERS_1050         1
-#endif /* PLATFORM_BridgeOS */
-#ifdef PLATFORM_DriverKit
+#endif /* XNU_PLATFORM_BridgeOS */
+#ifdef XNU_PLATFORM_DriverKit
 /* Platform: DriverKit */
 #define __DARWIN_ONLY_64_BIT_INO_T      1
 #define __DARWIN_ONLY_UNIX_CONFORMANCE  1
 #define __DARWIN_ONLY_VERS_1050         1
-#endif /* PLATFORM_DriverKit */
-#ifdef PLATFORM_MacOSX
+#endif /* XNU_PLATFORM_DriverKit */
+#ifdef XNU_PLATFORM_MacOSX
 /* Platform: MacOSX */
+#if defined(__i386__)
 #define __DARWIN_ONLY_64_BIT_INO_T      0
-/* #undef __DARWIN_ONLY_UNIX_CONFORMANCE (automatically set for 64-bit) */
+#define __DARWIN_ONLY_UNIX_CONFORMANCE  0
 #define __DARWIN_ONLY_VERS_1050         0
-#endif /* PLATFORM_MacOSX */
+#elif defined(__x86_64__)
+#define __DARWIN_ONLY_64_BIT_INO_T      0
+#define __DARWIN_ONLY_UNIX_CONFORMANCE  1
+#define __DARWIN_ONLY_VERS_1050         0
+#else
+#define __DARWIN_ONLY_64_BIT_INO_T      1
+#define __DARWIN_ONLY_UNIX_CONFORMANCE  1
+#define __DARWIN_ONLY_VERS_1050         1
+#endif
+#endif /* XNU_PLATFORM_MacOSX */
 #endif /* KERNEL */
 
 /*
@@ -583,14 +648,6 @@
  * pre-10.5, and it is the default compilation environment, revert the
  * compilation environment to pre-__DARWIN_UNIX03.
  */
-#if !defined(__DARWIN_ONLY_UNIX_CONFORMANCE)
-#  if defined(__LP64__)
-#    define __DARWIN_ONLY_UNIX_CONFORMANCE 1
-#  else /* !__LP64__ */
-#    define __DARWIN_ONLY_UNIX_CONFORMANCE 0
-#  endif /* __LP64__ */
-#endif /* !__DARWIN_ONLY_UNIX_CONFORMANCE */
-
 #if !defined(__DARWIN_UNIX03)
 #  if defined(KERNEL)
 #    define __DARWIN_UNIX03     0
@@ -724,7 +781,7 @@
 #define __DARWIN_EXTSN(sym)             __asm("_" __STRING(sym) __DARWIN_SUF_EXTSN)
 #define __DARWIN_EXTSN_C(sym)           __asm("_" __STRING(sym) __DARWIN_SUF_EXTSN __DARWIN_SUF_NON_CANCELABLE)
 #if XNU_KERNEL_PRIVATE
-#define __XNU_INTERNAL(sym)             __asm("_" __STRING(sym) "$XNU_INTERNAL")
+#define __XNU_INTERNAL(sym)             __asm("_" __STRING(sym) "$XNU_INTERNAL") __attribute__((used))
 #endif
 
 /*
@@ -907,7 +964,19 @@
  * catastrophic run-time failures.
  */
 #ifndef __CAST_AWAY_QUALIFIER
-#define __CAST_AWAY_QUALIFIER(variable, qualifier, type)  (type) (long)(variable)
+/*
+ * XXX: this shouldn't ignore anything more than -Wcast-qual,
+ * but the old implementation made it an almighty cast that
+ * ignored everything, so things break left and right if you
+ * make it only ignore -Wcast-qual.
+ */
+#define __CAST_AWAY_QUALIFIER(variable, qualifier, type) \
+	_Pragma("GCC diagnostic push") \
+	_Pragma("GCC diagnostic ignored \"-Wcast-qual\"") \
+	_Pragma("GCC diagnostic ignored \"-Wcast-align\"") \
+	_Pragma("GCC diagnostic ignored \"-Waddress-of-packed-member\"") \
+	((type)(variable)) \
+	_Pragma("GCC diagnostic pop")
 #endif
 
 /*
@@ -916,6 +985,72 @@
  */
 #ifndef __XNU_PRIVATE_EXTERN
 #define __XNU_PRIVATE_EXTERN __attribute__((visibility("hidden")))
+#endif
+
+#if __has_include(<ptrcheck.h>)
+#include <ptrcheck.h>
+#else
+/*
+ * We intentionally define to nothing pointer attributes which do not have an
+ * impact on the ABI. __indexable and __bidi_indexable are not defined because
+ * of the ABI incompatibility that makes the diagnostic preferable.
+ */
+#define __has_ptrcheck 0
+#define __single
+#define __unsafe_indexable
+#define __counted_by(N)
+#define __sized_by(N)
+#define __ended_by(E)
+#define __terminated_by(T)
+#define __null_terminated
+
+/*
+ * Similarly, we intentionally define to nothing the
+ * __ptrcheck_abi_assume_single and __ptrcheck_abi_assume_unsafe_indexable
+ * macros because they do not lead to an ABI incompatibility. However, we do not
+ * define the indexable and unsafe_indexable ones because the diagnostic is
+ * better than the silent ABI break.
+ */
+#define __ptrcheck_abi_assume_single()
+#define __ptrcheck_abi_assume_unsafe_indexable()
+
+/* __unsafe_forge intrinsics are defined as regular C casts. */
+#define __unsafe_forge_bidi_indexable(T, P, S) ((T)(P))
+#define __unsafe_forge_single(T, P) ((T)(P))
+#define __terminated_by_to_indexable(P) (P)
+#define __unsafe_terminated_by_to_indexable(P) (P)
+#define __null_terminated_to_indexable(P) (P)
+#define __unsafe_null_terminated_to_indexable(P) (P)
+#define __unsafe_terminated_by_from_indexable(T, P, ...) (P)
+#define __unsafe_null_terminated_from_indexable(P, ...) (P)
+
+/* decay operates normally; attribute is meaningless without pointer checks. */
+#define __array_decay_dicards_count_in_parameters
+
+/* this is a write-once variable; not useful without pointer checks. */
+#define __unsafe_late_const
+#endif /* !__has_include(<ptrcheck.h>) */
+
+#if KERNEL && !BOUND_CHECKS && !__has_ptrcheck
+/*
+ * With pointer checks disabled, we define __indexable to allow source to still
+ * contain these annotations. This is safe in builds which _uniformly_ disable
+ * pointer checks (but not in builds which inconsistently have them enabled).
+ */
+
+#define __indexable
+#define __bidi_indexable
+#endif
+
+#define __ASSUME_PTR_ABI_SINGLE_BEGIN       __ptrcheck_abi_assume_single()
+#define __ASSUME_PTR_ABI_SINGLE_END         __ptrcheck_abi_assume_unsafe_indexable()
+
+#if __has_ptrcheck
+#define __header_indexable                  __indexable
+#define __header_bidi_indexable             __bidi_indexable
+#else
+#define __header_indexable
+#define __header_bidi_indexable
 #endif
 
 /*
@@ -935,7 +1070,7 @@
  */
 #define __IGNORE_WCASTALIGN(x) _Pragma("clang diagnostic push")                     \
 	                       _Pragma("clang diagnostic ignored \"-Wcast-align\"") \
-	                       x;                                                   \
+	                       x                                                    \
 	                       _Pragma("clang diagnostic pop")
 #endif
 
@@ -950,17 +1085,24 @@
 #define __improbable(x) __builtin_expect(!!(x), 0)
 #endif /* !defined(__probable) && !defined(__improbable) */
 
-#if defined(__cplusplus)
-#define __container_of(ptr, type, field) __extension__({ \
-	        const typeof(((type *)nullptr)->field) *__ptr = (ptr); \
-	        (type *)((uintptr_t)__ptr - offsetof(type, field)); \
-	})
-#else
-#define __container_of(ptr, type, field) __extension__({ \
-	        const typeof(((type *)NULL)->field) *__ptr = (ptr); \
-	        (type *)((uintptr_t)__ptr - offsetof(type, field)); \
-	})
-#endif
+#define __container_of(ptr, type_t, field) __extension__({ \
+	const __typeof__(((type_t *)NULL)->field) *__ptr = (ptr);               \
+	uintptr_t __result = (uintptr_t)__ptr - offsetof(type_t, field);        \
+	if (__ptr) __builtin_assume(__result != 0);                             \
+	__unsafe_forge_single(type_t *, __result);                              \
+})
+
+#define __container_of_safe(ptr, type_t, field) __extension__({ \
+	const __typeof__(((type_t *)NULL)->field) *__ptr_or_null = (ptr);       \
+	__ptr_or_null ? __container_of(__ptr_or_null, type_t, field) : NULL;    \
+})
+
+/*
+ * This forces the optimizer to materialize the specified variable value,
+ * and prevents any reordering of operations done to it.
+ */
+#define __compiler_materialize_and_prevent_reordering_on(var) \
+	__asm__ ("" : "=r"(var) : "0"(var))
 
 #endif /* KERNEL || PRIVATE */
 
@@ -1006,5 +1148,69 @@
 #define __options_closed_decl(_name, _type, ...) \
 	        typedef _type _name; enum __VA_ARGS__ __enum_closed __enum_options
 #endif
+
+#if XNU_KERNEL_PRIVATE
+/*
+ * __xnu_struct_group() can be used to declare a set of fields to be grouped
+ * together logically in order to perform safer memory operations
+ * (assignment, zeroing, ...) on them.
+ */
+#ifdef __cplusplus
+#define __xnu_struct_group(group_type, group_name, ...) \
+	struct group_type __VA_ARGS__; \
+	union { \
+	    struct __VA_ARGS__; \
+	    struct group_type group_name; \
+	}
+#else
+#define __xnu_struct_group(group_type, group_name, ...) \
+	union { \
+	    struct __VA_ARGS__; \
+	    struct group_type __VA_ARGS__ group_name; \
+	}
+#endif
+#endif /* XNU_KERNEL_PRIVATE */
+
+#if defined(KERNEL) && __has_attribute(xnu_usage_semantics)
+/*
+ * These macros can be used to annotate type definitions or scalar structure
+ * fields to inform the compiler about which semantic they have with regards
+ * to the content of the underlying memory represented by such type or field.
+ *
+ * This information is used in the analysis of the types performed by the
+ * signature based type segregation implemented in kalloc.
+ */
+#define __kernel_ptr_semantics __attribute__((xnu_usage_semantics("pointer")))
+#define __kernel_data_semantics __attribute__((xnu_usage_semantics("data")))
+#define __kernel_dual_semantics __attribute__((xnu_usage_semantics("pointer", "data")))
+
+#else  /* defined(KERNEL) && __has_attribute(xnu_usage_semantics) */
+
+#define __kernel_ptr_semantics
+#define __kernel_data_semantics
+#define __kernel_dual_semantics
+
+#endif /* defined(KERNEL) && __has_attribute(xnu_usage_semantics) */
+
+#if XNU_KERNEL_PRIVATE
+/*
+ * Compiler-dependent macros that bracket portions of code where the
+ * "-Wxnu-typed-allocators" warning should be ignored.
+ */
+#if defined(__clang__)
+# define __typed_allocators_ignore_push \
+	 _Pragma("clang diagnostic push") \
+	 _Pragma("clang diagnostic ignored \"-Wxnu-typed-allocators\"")
+# define __typed_allocators_ignore_pop \
+	 _Pragma("clang diagnostic pop")
+# define __typed_allocators_ignore(x) __typed_allocators_ignore_push \
+	                              x                              \
+	                              __typed_allocators_ignore_pop
+#else
+# define __typed_allocators_ignore_push
+# define __typed_allocators_ignore_push
+# define __typed_allocators_ignore(x) x
+#endif /* __clang */
+#endif /* XNU_KERNEL_PRIVATE */
 
 #endif /* !_CDEFS_H_ */

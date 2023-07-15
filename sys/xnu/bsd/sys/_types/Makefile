@@ -14,6 +14,7 @@ EXPINC_SUBDIRS =
 #	  $(DSTROOT)/System/Library/Frameworks/System.framework/Headers
 #	  $(DSTROOT)/System/Library/Frameworks/System.framework/PrivateHeaders
 #	  $(DSTROOT)/usr/include/
+# These are covered by ../darwin_posix_sys_types.modulemap.
 DATAFILES = \
 	_blkcnt_t.h \
 	_blksize_t.h \
@@ -35,6 +36,7 @@ DATAFILES = \
 	_fsid_t.h \
 	_fsobj_id_t.h \
 	_gid_t.h \
+	_graftdmg_un.h \
 	_guid_t.h \
 	_id_t.h \
 	_in_addr_t.h \
@@ -108,6 +110,7 @@ DRIVERKIT_DATAFILES = \
 	_int64_t.h \
 	_int8_t.h \
 	_intptr_t.h \
+	_time_t.h \
 	_mbstate_t.h \
 	_null.h \
 	_offsetof.h \
@@ -121,11 +124,17 @@ DRIVERKIT_DATAFILES = \
 	_u_int32_t.h \
 	_u_int64_t.h \
 	_u_int8_t.h \
+	_u_int.h \
+	_u_char.h \
+	_u_short.h \
 	_uintptr_t.h \
 	_uuid_t.h \
 	_va_list.h \
 	_wchar_t.h \
 	_wint_t.h \
+	_in_addr_t.h\
+	_in_port_t.h\
+	_sa_family_t.h
 
 # Installs header file for Apple internal use in user level -
 #	  $(DSTROOT)/System/Library/Frameworks/System.framework/PrivateHeaders
@@ -164,7 +173,7 @@ EXPORT_MI_GEN_LIST =
 EXPORT_MI_DIR = sys/_types
 
 # /System/Library/Frameworks/System.framework/PrivateHeaders
-INSTALL_MI_LCL_LIST = ${PRIVATE_DATAFILES}
+INSTALL_SF_MI_LCL_LIST = ${DATAFILES} ${PRIVATE_DATAFILES}
 
 # /System/Library/Frameworks/Kernel.framework/PrivateHeaders
 INSTALL_KF_MI_LCL_LIST =  ${KERNELFILES} ${PRIVATE_KERNELFILES}

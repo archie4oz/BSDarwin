@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2013 Apple Inc. All rights reserved.
+ * Copyright (c) 2012-2020 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -29,10 +29,12 @@
 #include <arm/cpu_data_internal.h>
 #include <arm/misc_protos.h>
 #include <kern/thread.h>
+#include <kern/zalloc_internal.h>
 #include <sys/errno.h>
 #include <vm/pmap.h>
 #include <vm/vm_map.h>
 #include <san/kasan.h>
+#include <arm/pmap.h>
 
 #undef copyin
 #undef copyout
@@ -48,10 +50,8 @@ extern int _copyout_atomic64(uint64_t u64, const char *dst);
 
 extern int copyoutstr_prevalidate(const void *kaddr, user_addr_t uaddr, size_t len);
 
-extern pmap_t kernel_pmap;
-
-/* On by default, optionally disabled by boot-arg */
-extern boolean_t copyio_zalloc_check;
+extern const vm_map_address_t physmap_base;
+extern const vm_map_address_t physmap_end;
 
 /*!
  * @typedef copyio_flags_t
@@ -89,6 +89,7 @@ user_access_enable(void)
 	assert(__builtin_arm_rsr("pan") != 0);
 	__builtin_arm_wsr("pan", 0);
 #endif  /* __ARM_PAN_AVAILABLE__ */
+
 }
 
 static inline void
@@ -97,6 +98,7 @@ user_access_disable(void)
 #if __ARM_PAN_AVAILABLE__
 	__builtin_arm_wsr("pan", 1);
 #endif  /* __ARM_PAN_AVAILABLE__ */
+
 }
 
 /*
@@ -148,9 +150,17 @@ copy_validate(const user_addr_t user_addr, uintptr_t kernel_addr,
 	}
 
 	if ((flags & COPYIO_VALIDATE_USER_ONLY) == 0) {
-		if (__improbable((kernel_addr < VM_MIN_KERNEL_ADDRESS) ||
-		    os_add_overflow(kernel_addr, nbytes, &kernel_addr_last) ||
-		    (kernel_addr_last > VM_MAX_KERNEL_ADDRESS))) {
+		if (__improbable(os_add_overflow(kernel_addr, nbytes, &kernel_addr_last))) {
+			panic("%s(%p, %p, %lu) - kaddr not in kernel", __func__,
+			    (void *)user_addr, (void *)kernel_addr, nbytes);
+		}
+
+		bool in_kva = (VM_KERNEL_STRIP_UPTR(kernel_addr) >= VM_MIN_KERNEL_ADDRESS) &&
+		    (VM_KERNEL_STRIP_UPTR(kernel_addr_last) <= VM_MAX_KERNEL_ADDRESS);
+		bool in_physmap = (VM_KERNEL_STRIP_UPTR(kernel_addr) >= physmap_base) &&
+		    (VM_KERNEL_STRIP_UPTR(kernel_addr_last) <= physmap_end);
+
+		if (__improbable(!(in_kva || in_physmap))) {
 			panic("%s(%p, %p, %lu) - kaddr not in kernel", __func__,
 			    (void *)user_addr, (void *)kernel_addr, nbytes);
 		}
@@ -168,21 +178,13 @@ copy_validate(const user_addr_t user_addr, uintptr_t kernel_addr,
 	}
 
 	if ((flags & COPYIO_VALIDATE_USER_ONLY) == 0) {
-		if (__probable(copyio_zalloc_check)) {
-			vm_size_t kernel_buf_size = zone_element_size((void *)kernel_addr, NULL);
-			if (__improbable(kernel_buf_size && kernel_buf_size < nbytes)) {
-				panic("copyio_preflight: kernel buffer 0x%lx has size %lu < nbytes %lu",
-				    kernel_addr, kernel_buf_size, nbytes);
-			}
-		}
-
+		zone_element_bounds_check(kernel_addr, nbytes);
 #if KASAN
 		/* For user copies, asan-check the kernel-side buffer */
 		if (flags & COPYIO_IN) {
 			__asan_storeN(kernel_addr, nbytes);
 		} else {
 			__asan_loadN(kernel_addr, nbytes);
-			kasan_check_uninitialized((vm_address_t)kernel_addr, nbytes);
 		}
 #endif
 	}
@@ -361,3 +363,15 @@ copyoutstr_prevalidate(const void *__unused kaddr, user_addr_t __unused uaddr, s
 
 	return 0;
 }
+
+#if (DEBUG || DEVELOPMENT)
+int
+verify_write(const void *source, void *dst, size_t size)
+{
+	int rc;
+	disable_preemption();
+	rc = _bcopyout((const char*)source, (char*)dst, size);
+	enable_preemption();
+	return rc;
+}
+#endif

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998-2011 Apple Inc. All rights reserved.
+ * Copyright (c) 1998-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -31,16 +31,27 @@
 #include <IOKit/IOCatalogue.h>
 #include <IOKit/IODeviceTreeSupport.h>
 #include <IOKit/IOKitKeys.h>
+#include <IOKit/IONVRAM.h>
 #include <IOKit/IOPlatformExpert.h>
 #include <IOKit/IOUserClient.h>
+#include <libkern/c++/OSAllocation.h>
 
 extern "C" {
+#include <libkern/amfi/amfi.h>
+#include <sys/codesign.h>
+#include <sys/code_signing.h>
+#include <vm/pmap.h>
+#include <vm/vm_map.h>
 #include <pexpert/pexpert.h>
 #include <kern/clock.h>
+#if CONFIG_KDP_INTERACTIVE_DEBUGGING
+#include <kern/debug.h>
+#endif
 #include <mach/machine.h>
 #include <uuid/uuid.h>
 #include <sys/vnode_internal.h>
 #include <sys/mount.h>
+#include <corecrypto/ccsha2.h>
 
 // how long to wait for matching root device, secs
 #if DEBUG
@@ -54,6 +65,8 @@ extern dev_t mdevlookup(int devid);
 extern void mdevremoveall(void);
 extern int mdevgetrange(int devid, uint64_t *base, uint64_t *size);
 extern void di_root_ramfile(IORegistryEntry * entry);
+extern int IODTGetDefault(const char *key, void *infoAddr, unsigned int infoSize);
+extern boolean_t cpuid_vmm_present(void);
 
 #define ROUNDUP(a, b) (((a) + ((b) - 1)) & (~((b) - 1)))
 
@@ -61,9 +74,13 @@ extern void di_root_ramfile(IORegistryEntry * entry);
 
 #if defined(XNU_TARGET_OS_BRIDGE)
 #define kIOCoreDumpPath         "/private/var/internal/kernelcore"
+#elif defined(XNU_TARGET_OS_OSX)
+#define kIOCoreDumpPath         "/System/Volumes/VM/kernelcore"
 #else
 #define kIOCoreDumpPath         "/private/var/vm/kernelcore"
 #endif
+
+#define SYSTEM_NVRAM_PREFIX     "40A0DDD2-77F8-4392-B4A3-1E7304206516:"
 
 #if CONFIG_KDP_INTERACTIVE_DEBUGGING
 /*
@@ -71,6 +88,16 @@ extern void di_root_ramfile(IORegistryEntry * entry);
  */
 extern uint64_t kdp_core_ramdisk_addr;
 extern uint64_t kdp_core_ramdisk_size;
+
+/*
+ * A callback to indicate that the polled-mode corefile is now available.
+ */
+extern kern_return_t kdp_core_polled_io_polled_file_available(IOCoreFileAccessCallback access_data, void *access_context, void *recipient_context);
+
+/*
+ * A callback to indicate that the polled-mode corefile is no longer available.
+ */
+extern kern_return_t kdp_core_polled_io_polled_file_unavailable(void);
 #endif
 
 #if IOPOLLED_COREFILE
@@ -272,7 +299,7 @@ IORegisterNetworkInterface( IOService * netif )
 	OSNumber *     zero    = NULL;
 	OSString *     path    = NULL;
 	OSDictionary * dict    = NULL;
-	char *         pathBuf = NULL;
+	OSDataAllocation<char> pathBuf;
 	int            len;
 	enum { kMaxPathLen = 512 };
 
@@ -293,18 +320,18 @@ IORegisterNetworkInterface( IOService * netif )
 			break;
 		}
 
-		pathBuf = (char *) IOMalloc( kMaxPathLen );
-		if (pathBuf == NULL) {
+		pathBuf = OSDataAllocation<char>( kMaxPathLen, OSAllocateMemory );
+		if (!pathBuf) {
 			break;
 		}
 
 		len = kMaxPathLen;
-		if (netif->getPath( pathBuf, &len, gIOServicePlane )
+		if (netif->getPath( pathBuf.data(), &len, gIOServicePlane )
 		    == false) {
 			break;
 		}
 
-		path = OSString::withCStringNoCopy( pathBuf );
+		path = OSString::withCStringNoCopy(pathBuf.data());
 		if (path == NULL) {
 			break;
 		}
@@ -324,9 +351,6 @@ IORegisterNetworkInterface( IOService * netif )
 	if (dict) {
 		dict->release();
 	}
-	if (pathBuf) {
-		IOFree(pathBuf, kMaxPathLen);
-	}
 
 	return netif->getProperty( kIOBSDNameKey ) != NULL;
 }
@@ -340,7 +364,7 @@ IOOFPathMatching( const char * path, char * buf, int maxLen )
 	int                 len;
 
 	do {
-		len = strlen( kIODeviceTreePlane ":" );
+		len = ((int) strlen( kIODeviceTreePlane ":" ));
 		maxLen -= len;
 		if (maxLen <= 0) {
 			continue;
@@ -349,7 +373,7 @@ IOOFPathMatching( const char * path, char * buf, int maxLen )
 		strlcpy( buf, kIODeviceTreePlane ":", len + 1 );
 		comp = buf + len;
 
-		len = strlen( path );
+		len = ((int) strnlen( path, INT_MAX ));
 		maxLen -= len;
 		if (maxLen <= 0) {
 			continue;
@@ -381,6 +405,252 @@ IOOFPathMatching( const char * path, char * buf, int maxLen )
 static int didRam = 0;
 enum { kMaxPathBuf = 512, kMaxBootVar = 128 };
 
+bool
+IOGetBootUUID(char *uuid)
+{
+	IORegistryEntry *entry;
+	OSData *uuid_data = NULL;
+	bool result = false;
+
+	if ((entry = IORegistryEntry::fromPath("/chosen", gIODTPlane))) {
+		uuid_data = (OSData *)entry->getProperty("boot-uuid");
+		if (uuid_data) {
+			unsigned int length = uuid_data->getLength();
+			if (length <= sizeof(uuid_string_t)) {
+				/* ensure caller's buffer is fully initialized: */
+				bzero(uuid, sizeof(uuid_string_t));
+				/* copy the content of uuid_data->getBytesNoCopy() into uuid */
+				memcpy(uuid, uuid_data->getBytesNoCopy(), length);
+				/* guarantee nul-termination: */
+				uuid[sizeof(uuid_string_t) - 1] = '\0';
+				result = true;
+			} else {
+				uuid = NULL;
+			}
+		}
+		OSSafeReleaseNULL(entry);
+	}
+	return result;
+}
+
+bool
+IOGetApfsPrebootUUID(char *uuid)
+{
+	IORegistryEntry *entry;
+	OSData *uuid_data = NULL;
+	bool result = false;
+
+	if ((entry = IORegistryEntry::fromPath("/chosen", gIODTPlane))) {
+		uuid_data = (OSData *)entry->getProperty("apfs-preboot-uuid");
+
+		if (uuid_data) {
+			unsigned int length = uuid_data->getLength();
+			if (length <= sizeof(uuid_string_t)) {
+				/* ensure caller's buffer is fully initialized: */
+				bzero(uuid, sizeof(uuid_string_t));
+				/* copy the content of uuid_data->getBytesNoCopy() into uuid */
+				memcpy(uuid, uuid_data->getBytesNoCopy(), length);
+				/* guarantee nul-termination: */
+				uuid[sizeof(uuid_string_t) - 1] = '\0';
+				result = true;
+			} else {
+				uuid = NULL;
+			}
+		}
+		OSSafeReleaseNULL(entry);
+	}
+	return result;
+}
+
+bool
+IOGetAssociatedApfsVolgroupUUID(char *uuid)
+{
+	IORegistryEntry *entry;
+	OSData *uuid_data = NULL;
+	bool result = false;
+
+	if ((entry = IORegistryEntry::fromPath("/chosen", gIODTPlane))) {
+		uuid_data = (OSData *)entry->getProperty("associated-volume-group");
+
+		if (uuid_data) {
+			unsigned int length = uuid_data->getLength();
+
+			if (length <= sizeof(uuid_string_t)) {
+				/* ensure caller's buffer is fully initialized: */
+				bzero(uuid, sizeof(uuid_string_t));
+				/* copy the content of uuid_data->getBytesNoCopy() into uuid */
+				memcpy(uuid, uuid_data->getBytesNoCopy(), length);
+				/* guarantee nul-termination: */
+				uuid[sizeof(uuid_string_t) - 1] = '\0';
+				result = true;
+			} else {
+				uuid = NULL;
+			}
+		}
+		OSSafeReleaseNULL(entry);
+	}
+	return result;
+}
+
+bool
+IOGetBootObjectsPath(char *path_prefix)
+{
+	IORegistryEntry *entry;
+	OSData *path_prefix_data = NULL;
+	bool result = false;
+
+	if ((entry = IORegistryEntry::fromPath("/chosen", gIODTPlane))) {
+		path_prefix_data = (OSData *)entry->getProperty("boot-objects-path");
+
+		if (path_prefix_data) {
+			unsigned int length = path_prefix_data->getLength();
+
+			if (length <= MAXPATHLEN) {
+				/* ensure caller's buffer is fully initialized: */
+				bzero(path_prefix, MAXPATHLEN);
+				/* copy the content of path_prefix_data->getBytesNoCopy() into path_prefix */
+				memcpy(path_prefix, path_prefix_data->getBytesNoCopy(), length);
+				/* guarantee nul-termination: */
+				path_prefix[MAXPATHLEN - 1] = '\0';
+				result = true;
+			} else {
+				path_prefix = NULL;
+			}
+		}
+		OSSafeReleaseNULL(entry);
+	}
+	return result;
+}
+
+
+bool
+IOGetBootManifestHash(char *hash_data, size_t *hash_data_size)
+{
+	IORegistryEntry *entry = NULL;
+	OSData *manifest_hash_data = NULL;
+	bool result = false;
+
+	if ((entry = IORegistryEntry::fromPath("/chosen", gIODTPlane))) {
+		manifest_hash_data = (OSData *)entry->getProperty("boot-manifest-hash");
+		if (manifest_hash_data) {
+			unsigned int length = manifest_hash_data->getLength();
+			/* hashed with SHA2-384 or SHA1, the boot manifest hash should be 48 Bytes or less */
+			if ((length <= CCSHA384_OUTPUT_SIZE) && (*hash_data_size >= CCSHA384_OUTPUT_SIZE)) {
+				/* ensure caller's buffer is fully initialized: */
+				bzero(hash_data, CCSHA384_OUTPUT_SIZE);
+				/* copy the content of manifest_hash_data->getBytesNoCopy() into hash_data */
+				memcpy(hash_data, manifest_hash_data->getBytesNoCopy(), length);
+				*hash_data_size = length;
+				result = true;
+			} else {
+				hash_data = NULL;
+				*hash_data_size = 0;
+			}
+		}
+		OSSafeReleaseNULL(entry);
+	}
+
+	return result;
+}
+
+/*
+ * Set NVRAM to boot into the right flavor of Recovery,
+ * optionally passing a UUID of a volume that failed to boot.
+ * If `reboot` is true, reboot immediately.
+ *
+ * Returns true if `mode` was understood, false otherwise.
+ * (Does not return if `reboot` is true.)
+ */
+boolean_t
+IOSetRecoveryBoot(bsd_bootfail_mode_t mode, uuid_t volume_uuid, boolean_t reboot)
+{
+	IODTNVRAM *nvram = NULL;
+	const OSSymbol *boot_command_sym = NULL;
+	OSString *boot_command_recover = NULL;
+
+	if (mode == BSD_BOOTFAIL_SEAL_BROKEN) {
+		const char *boot_mode = "ssv-seal-broken";
+		uuid_string_t volume_uuid_str;
+
+		// Set `recovery-broken-seal-uuid = <volume_uuid>`.
+		if (volume_uuid) {
+			uuid_unparse_upper(volume_uuid, volume_uuid_str);
+
+			if (!PEWriteNVRAMProperty(SYSTEM_NVRAM_PREFIX "recovery-broken-seal-uuid",
+			    volume_uuid_str, sizeof(uuid_string_t))) {
+				IOLog("Failed to write recovery-broken-seal-uuid to NVRAM.\n");
+			}
+		}
+
+		// Set `recovery-boot-mode = ssv-seal-broken`.
+		if (!PEWriteNVRAMProperty(SYSTEM_NVRAM_PREFIX "recovery-boot-mode", boot_mode,
+		    (const unsigned int) strlen(boot_mode))) {
+			IOLog("Failed to write recovery-boot-mode to NVRAM.\n");
+		}
+	} else if (mode == BSD_BOOTFAIL_MEDIA_MISSING) {
+		const char *boot_picker_reason = "missing-boot-media";
+
+		// Set `boot-picker-bringup-reason = missing-boot-media`.
+		if (!PEWriteNVRAMProperty(SYSTEM_NVRAM_PREFIX "boot-picker-bringup-reason",
+		    boot_picker_reason, (const unsigned int) strlen(boot_picker_reason))) {
+			IOLog("Failed to write boot-picker-bringup-reason to NVRAM.\n");
+		}
+
+		// Set `boot-command = recover-system`.
+
+		// Construct an OSSymbol and an OSString to be the (key, value) pair
+		// we write to NVRAM. Unfortunately, since our value must be an OSString
+		// instead of an OSData, we cannot use PEWriteNVRAMProperty() here.
+		boot_command_sym = OSSymbol::withCStringNoCopy(SYSTEM_NVRAM_PREFIX "boot-command");
+		boot_command_recover = OSString::withCStringNoCopy("recover-system");
+		if (boot_command_sym == NULL || boot_command_recover == NULL) {
+			IOLog("Failed to create boot-command strings.\n");
+			goto do_reboot;
+		}
+
+		// Wait for NVRAM to be readable...
+		nvram = OSDynamicCast(IODTNVRAM, IOService::waitForService(
+			    IOService::serviceMatching("IODTNVRAM")));
+		if (nvram == NULL) {
+			IOLog("Failed to acquire IODTNVRAM object.\n");
+			goto do_reboot;
+		}
+
+		// Wait for NVRAM to be writable...
+		if (!IOServiceWaitForMatchingResource("IONVRAM", UINT64_MAX)) {
+			IOLog("Failed to wait for IONVRAM service.\n");
+			// attempt the work anyway...
+		}
+
+		// Write the new boot-command to NVRAM, and sync if successful.
+		if (!nvram->setProperty(boot_command_sym, boot_command_recover)) {
+			IOLog("Failed to save new boot-command to NVRAM.\n");
+		} else {
+			nvram->sync();
+		}
+	} else {
+		IOLog("Unknown mode: %d\n", mode);
+		return false;
+	}
+
+	// Clean up and reboot!
+do_reboot:
+	if (boot_command_recover != NULL) {
+		boot_command_recover->release();
+	}
+
+	if (boot_command_sym != NULL) {
+		boot_command_sym->release();
+	}
+
+	if (reboot) {
+		IOLog("\nAbout to reboot into Recovery!\n");
+		(void)PEHaltRestart(kPERestartCPU);
+	}
+
+	return true;
+}
+
 kern_return_t
 IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
     dev_t * root, u_int32_t * oflags )
@@ -397,7 +667,7 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
 	int                 mnr, mjr;
 	const char *        mediaProperty = NULL;
 	char *              rdBootVar;
-	char *              str;
+	OSDataAllocation<char> str;
 	const char *        look = NULL;
 	int                 len;
 	bool                debugInfoPrintedOnce = false;
@@ -414,7 +684,7 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
 	matching->setObject(gIOResourceMatchedKey, gIOBSDKey);
 
 	if ((service = IOService::waitForMatchingService(matching, 30ULL * kSecondScale))) {
-		service->release();
+		OSSafeReleaseNULL(service);
 	} else {
 		IOLog("!BSD\n");
 	}
@@ -426,27 +696,30 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
 		IOSleep( 5 * 1000 );
 	}
 
-	str = (char *) IOMalloc( kMaxPathBuf + kMaxBootVar );
+	str = OSDataAllocation<char>( kMaxPathBuf + kMaxBootVar, OSAllocateMemory );
 	if (!str) {
 		return kIOReturnNoMemory;
 	}
-	rdBootVar = str + kMaxPathBuf;
+	rdBootVar = str.data() + kMaxPathBuf;
 
 	if (!PE_parse_boot_argn("rd", rdBootVar, kMaxBootVar )
 	    && !PE_parse_boot_argn("rootdev", rdBootVar, kMaxBootVar )) {
 		rdBootVar[0] = 0;
 	}
 
-	do {
-		if ((regEntry = IORegistryEntry::fromPath( "/chosen", gIODTPlane ))) {
+	if ((regEntry = IORegistryEntry::fromPath( "/chosen", gIODTPlane ))) {
+		do {
 			di_root_ramfile(regEntry);
+			OSObject* unserializedContainer = NULL;
 			data = OSDynamicCast(OSData, regEntry->getProperty( "root-matching" ));
 			if (data) {
-				matching = OSDynamicCast(OSDictionary, OSUnserializeXML((char *)data->getBytesNoCopy()));
+				unserializedContainer = OSUnserializeXML((char *)data->getBytesNoCopy());
+				matching = OSDynamicCast(OSDictionary, unserializedContainer);
 				if (matching) {
 					continue;
 				}
 			}
+			OSSafeReleaseNULL(unserializedContainer);
 
 			data = (OSData *) regEntry->getProperty( "boot-uuid" );
 			if (data) {
@@ -460,15 +733,14 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
 					uuidString->release();
 					matching = IOUUIDMatching();
 					mediaProperty = "boot-uuid-media";
-					regEntry->release();
 					continue;
 				} else {
 					uuidStr = NULL;
 				}
 			}
-			regEntry->release();
-		}
-	} while (false);
+		} while (false);
+		OSSafeReleaseNULL(regEntry);
+	}
 
 //
 //	See if we have a RAMDisk property in /chosen/memory-map.  If so, make it into a device.
@@ -482,7 +754,13 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
 			if (data) {                                                                                      /* We found one */
 				uintptr_t *ramdParms;
 				ramdParms = (uintptr_t *)data->getBytesNoCopy();        /* Point to the ram disk base and size */
-				(void)mdevadd(-1, ml_static_ptovirt(ramdParms[0]) >> 12, ramdParms[1] >> 12, 0);        /* Initialize it and pass back the device number */
+#if __LP64__
+#define MAX_PHYS_RAM    (((uint64_t)UINT_MAX) << 12)
+				if (ramdParms[1] > MAX_PHYS_RAM) {
+					panic("ramdisk params");
+				}
+#endif /* __LP64__ */
+				(void)mdevadd(-1, ml_static_ptovirt(ramdParms[0]) >> 12, (unsigned int) (ramdParms[1] >> 12), 0);        /* Initialize it and pass back the device number */
 			}
 			regEntry->release();                                                            /* Toss the entry */
 		}
@@ -506,11 +784,12 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
 			}
 		}
 		if (xchar >= 0) {                                                                                /* Do we have a valid memory device name? */
+			OSSafeReleaseNULL(matching);
 			*root = mdevlookup(xchar);                                                      /* Find the device number */
 			if (*root >= 0) {                                                                        /* Did we find one? */
 				rootName[0] = 'm';                                                              /* Build root name */
 				rootName[1] = 'd';                                                              /* Build root name */
-				rootName[2] = dchar;                                                    /* Build root name */
+				rootName[2] = (char) dchar;                                                     /* Build root name */
 				rootName[3] = 0;                                                                /* Build root name */
 				IOLog("BSD root: %s, major %d, minor %d\n", rootName, major(*root), minor(*root));
 				*oflags = 0;                                                                    /* Show that this is not network */
@@ -526,7 +805,7 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
 
 				goto iofrootx;                                                                  /* Join common exit... */
 			}
-			panic("IOFindBSDRoot: specified root memory device, %s, has not been configured\n", rdBootVar); /* Not there */
+			panic("IOFindBSDRoot: specified root memory device, %s, has not been configured", rdBootVar); /* Not there */
 		}
 	}
 
@@ -541,24 +820,22 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
 			matching = IONetworkNamePrefixMatching( "en" );
 			needNetworkKexts = true;
 		} else if (strncmp( look, "uuid", strlen( "uuid" )) == 0) {
-			char *uuid;
-			OSString *uuidString;
-
-			uuid = (char *)IOMalloc( kMaxBootVar );
+			OSDataAllocation<char> uuid( kMaxBootVar, OSAllocateMemory );
 
 			if (uuid) {
-				if (!PE_parse_boot_argn( "boot-uuid", uuid, kMaxBootVar )) {
+				OSString *uuidString;
+
+				if (!PE_parse_boot_argn( "boot-uuid", uuid.data(), kMaxBootVar )) {
 					panic( "rd=uuid but no boot-uuid=<value> specified" );
 				}
-				uuidString = OSString::withCString( uuid );
+				uuidString = OSString::withCString(uuid.data());
 				if (uuidString) {
 					IOService::publishResource( "boot-uuid", uuidString );
 					uuidString->release();
-					IOLog( "\nWaiting for boot volume with UUID %s\n", uuid );
+					IOLog("\nWaiting for boot volume with UUID %s\n", uuid.data());
 					matching = IOUUIDMatching();
 					mediaProperty = "boot-uuid-media";
 				}
-				IOFree( uuid, kMaxBootVar );
 			}
 		} else {
 			matching = IOBSDNameMatching( look );
@@ -570,6 +847,7 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
 		// Match any HFS media
 
 		matching = IOService::serviceMatching( "IOMedia" );
+		assert(matching);
 		astring = OSString::withCStringNoCopy("Apple_HFS");
 		if (astring) {
 			matching->setObject("Content", astring);
@@ -582,13 +860,13 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
 		IOService::getPlatform()->waitQuiet();
 	}
 
-	if (true && matching) {
+	if (matching) {
 		OSSerialize * s = OSSerialize::withCapacity( 5 );
 
 		if (matching->serialize( s )) {
 			IOLog( "Waiting on %s\n", s->text());
-			s->release();
 		}
+		s->release();
 	}
 
 	char namep[8];
@@ -603,8 +881,10 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
 		matching->retain();
 		service = IOService::waitForService( matching, &t );
 		if ((!service) || (mountAttempts == 10)) {
+#if !XNU_TARGET_OS_OSX || !defined(__arm64__)
 			PE_display_icon( 0, "noroot");
 			IOLog( "Still waiting for root device\n" );
+#endif
 
 			if (!debugInfoPrintedOnce) {
 				debugInfoPrintedOnce = true;
@@ -620,9 +900,17 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
 					IOPrintMemory();
 				}
 			}
+
+#if XNU_TARGET_OS_OSX && defined(__arm64__)
+			// The disk isn't found - have the user pick from System Recovery.
+			(void)IOSetRecoveryBoot(BSD_BOOTFAIL_MEDIA_MISSING, NULL, true);
+#elif XNU_TARGET_OS_IOS
+			panic("Failed to mount root device");
+#endif
 		}
 	} while (!service);
-	matching->release();
+
+	OSSafeReleaseNULL(matching);
 
 	if (service && mediaProperty) {
 		service = (IOService *)service->getProperty(mediaProperty);
@@ -643,8 +931,8 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
 
 	if (service) {
 		len = kMaxPathBuf;
-		service->getPath( str, &len, gIOServicePlane );
-		IOLog( "Got boot device = %s\n", str );
+		service->getPath( str.data(), &len, gIOServicePlane );
+		IOLog("Got boot device = %s\n", str.data());
 
 		iostr = (OSString *) service->getProperty( kIOBSDNameKey );
 		if (iostr) {
@@ -678,9 +966,10 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
 	*root = makedev( mjr, mnr );
 	*oflags = flags;
 
-	IOFree( str, kMaxPathBuf + kMaxBootVar );
-
 iofrootx:
+
+	IOService::setRootMedia(service);
+
 	if ((gIOKitDebug & (kIOLogDTree | kIOLogServiceTree | kIOLogMemory)) && !debugInfoPrintedOnce) {
 		IOService::getPlatform()->waitQuiet();
 		if (gIOKitDebug & kIOLogDTree) {
@@ -699,6 +988,13 @@ iofrootx:
 	return kIOReturnSuccess;
 }
 
+void
+IOSetImageBoot(void)
+{
+	// this will unhide all IOMedia, without waiting for kernelmanagement to start
+	IOService::setRootMedia(NULL);
+}
+
 bool
 IORamDiskBSDRoot(void)
 {
@@ -715,7 +1011,7 @@ IORamDiskBSDRoot(void)
 void
 IOSecureBSDRoot(const char * rootName)
 {
-#if CONFIG_EMBEDDED
+#if CONFIG_SECURE_BSD_ROOT
 	IOReturn         result;
 	IOPlatformExpert *pe;
 	OSDictionary     *matching;
@@ -736,7 +1032,7 @@ IOSecureBSDRoot(const char * rootName)
 		mdevremoveall();
 	}
 
-#endif  // CONFIG_EMBEDDED
+#endif  // CONFIG_SECURE_BSD_ROOT
 }
 
 void *
@@ -796,11 +1092,21 @@ IOBSDGetPlatformUUID( uuid_t uuid, mach_timespec_t timeout )
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 #include <sys/conf.h>
+#include <sys/lock.h>
 #include <sys/vnode.h>
+#include <sys/vnode_if.h>
 #include <sys/vnode_internal.h>
 #include <sys/fcntl.h>
+#include <sys/fsctl.h>
+#include <sys/mount.h>
 #include <IOKit/IOPolledInterface.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
+
+// see HFSIOC_VOLUME_STATUS in APFS/HFS
+#define HFS_IOCTL_VOLUME_STATUS _IOR('h', 24, u_int32_t)
+
+LCK_GRP_DECLARE(gIOPolledCoreFileGrp, "polled_corefile");
+LCK_MTX_DECLARE(gIOPolledCoreFileMtx, &gIOPolledCoreFileGrp);
 
 IOPolledFileIOVars * gIOPolledCoreFileVars;
 kern_return_t gIOPolledCoreFileOpenRet = kIOReturnNotReady;
@@ -813,7 +1119,7 @@ IOPolledCoreFileMode_t gIOPolledCoreFileMode = kIOPolledCoreFileModeNotInitializ
 #define kIOCoreDumpSize         150ULL*1024ULL*1024ULL
 #define kIOCoreDumpFreeSize     150ULL*1024ULL*1024ULL
 
-#elif CONFIG_EMBEDDED /* defined(XNU_TARGET_OS_BRIDGE) */
+#elif !defined(XNU_TARGET_OS_OSX) /* defined(XNU_TARGET_OS_BRIDGE) */
 // On embedded devices with >3GB DRAM we allocate a 500MB corefile
 // otherwise allocate a 350MB corefile. Leave 350 MB free
 
@@ -855,11 +1161,32 @@ IOCoreFileGetSize(uint64_t *ideal_size, uint64_t *fallback_size, uint64_t *free_
 
 	*ideal_size = *fallback_size = *free_space_to_leave = 0;
 
+	// If a custom size was requested, override the ideal and requested sizes
+	if (PE_parse_boot_argn("corefile_size_mb", &requested_corefile_size,
+	    sizeof(requested_corefile_size))) {
+		IOLog("Boot-args specify %d MB kernel corefile\n", requested_corefile_size);
+
+		*ideal_size = *fallback_size = (requested_corefile_size * 1024ULL * 1024ULL);
+		return;
+	}
+
+	unsigned int status_flags = 0;
+	int error = VNOP_IOCTL(rootvnode, HFS_IOCTL_VOLUME_STATUS, (caddr_t)&status_flags, 0,
+	    vfs_context_kernel());
+	if (!error) {
+		if (status_flags & (VQ_VERYLOWDISK | VQ_LOWDISK | VQ_NEARLOWDISK)) {
+			IOLog("Volume is low on space. Not allocating kernel corefile.\n");
+			return;
+		}
+	} else {
+		IOLog("Couldn't retrieve volume status. Error %d\n", error);
+	}
+
 #if defined(XNU_TARGET_OS_BRIDGE)
 #pragma unused(mode)
 	*ideal_size = *fallback_size = kIOCoreDumpSize;
 	*free_space_to_leave = kIOCoreDumpFreeSize;
-#elif CONFIG_EMBEDDED /* defined(XNU_TARGET_OS_BRIDGE) */
+#elif !defined(XNU_TARGET_OS_OSX) /* defined(XNU_TARGET_OS_BRIDGE) */
 #pragma unused(mode)
 	*ideal_size = *fallback_size = kIOCoreDumpMinSize;
 
@@ -879,14 +1206,27 @@ IOCoreFileGetSize(uint64_t *ideal_size, uint64_t *fallback_size, uint64_t *free_
 		*ideal_size = *fallback_size = *free_space_to_leave = kIOStackshotFileSize;
 	}
 #endif /* defined(XNU_TARGET_OS_BRIDGE) */
-	// If a custom size was requested, override the ideal and requested sizes
-	if (PE_parse_boot_argn("corefile_size_mb", &requested_corefile_size, sizeof(requested_corefile_size))) {
-		IOLog("Boot-args specify %d MB kernel corefile\n", requested_corefile_size);
-
-		*ideal_size = *fallback_size = (requested_corefile_size * 1024ULL * 1024ULL);
-	}
 
 	return;
+}
+
+static IOReturn
+IOAccessCoreFileData(void *context, boolean_t write, uint64_t offset, int length, void *buffer)
+{
+	errno_t vnode_error = 0;
+	vfs_context_t vfs_context;
+	vnode_t vnode_ptr = (vnode_t) context;
+
+	vfs_context = vfs_context_kernel();
+	vnode_error = vn_rdwr(write ? UIO_WRITE : UIO_READ, vnode_ptr, (caddr_t)buffer, length, offset,
+	    UIO_SYSSPACE, IO_SWAP_DISPATCH | IO_SYNC | IO_NOCACHE | IO_UNIT, vfs_context_ucred(vfs_context), NULL, vfs_context_proc(vfs_context));
+
+	if (vnode_error) {
+		IOLog("Failed to %s the corefile. Error %d\n", write ? "write to" : "read from", vnode_error);
+		return kIOReturnError;
+	}
+
+	return kIOReturnSuccess;
 }
 
 static void
@@ -906,6 +1246,10 @@ IOOpenPolledCoreFile(thread_call_param_t __unused, thread_call_param_t corefilen
 		return;
 	}
 
+	if (gIOPolledCoreFileMode == kIOPolledCoreFileModeUnlinked) {
+		return;
+	}
+
 	if (mode_to_init == kIOPolledCoreFileModeDisabled) {
 		gIOPolledCoreFileMode = kIOPolledCoreFileModeDisabled;
 		return;
@@ -916,6 +1260,11 @@ IOOpenPolledCoreFile(thread_call_param_t __unused, thread_call_param_t corefilen
 	gIOPolledCoreFileMode = kIOPolledCoreFileModeClosed;
 
 	IOCoreFileGetSize(&corefile_size_bytes, &corefile_fallback_size_bytes, &free_space_to_leave_bytes, mode_to_init);
+
+	if (corefile_size_bytes == 0 && corefile_fallback_size_bytes == 0) {
+		gIOPolledCoreFileMode = kIOPolledCoreFileModeUnlinked;
+		return;
+	}
 
 	do {
 		err = IOPolledFileOpen(filename, kIOPolledFileCreate, corefile_size_bytes, free_space_to_leave_bytes,
@@ -948,23 +1297,74 @@ IOOpenPolledCoreFile(thread_call_param_t __unused, thread_call_param_t corefilen
 
 	gIOPolledCoreFileOpenRet = IOPolledFilePollersSetup(gIOPolledCoreFileVars, kIOPolledPreflightCoreDumpState);
 	if (kIOReturnSuccess != gIOPolledCoreFileOpenRet) {
-		IOPolledFileClose(&gIOPolledCoreFileVars, 0, NULL, 0, 0, 0);
+		IOPolledFileClose(&gIOPolledCoreFileVars, 0, NULL, 0, 0, 0, false);
 		IOLog("IOPolledFilePollersSetup for corefile failed with error: 0x%x\n", err);
 	} else {
 		IOLog("Opened corefile of size %llu MB\n", (corefile_size_bytes / (1024ULL * 1024ULL)));
 		gIOPolledCoreFileMode = mode_to_init;
 	}
 
+	// Provide the "polled file available" callback with a temporary way to read from the file
+	(void) IOProvideCoreFileAccess(kdp_core_polled_io_polled_file_available, NULL);
+
 	return;
+}
+
+kern_return_t
+IOProvideCoreFileAccess(IOCoreFileAccessRecipient recipient, void *recipient_context)
+{
+	kern_return_t error = kIOReturnSuccess;
+	errno_t vnode_error = 0;
+	vfs_context_t vfs_context;
+	vnode_t vnode_ptr;
+
+	if (!recipient) {
+		return kIOReturnBadArgument;
+	}
+
+	if (kIOReturnSuccess != gIOPolledCoreFileOpenRet) {
+		return kIOReturnNotReady;
+	}
+
+	// Open the kernel corefile
+	vfs_context = vfs_context_kernel();
+	vnode_error = vnode_open(kIOCoreDumpPath, (FREAD | FWRITE | O_NOFOLLOW), 0600, 0, &vnode_ptr, vfs_context);
+	if (vnode_error) {
+		IOLog("Failed to open the corefile. Error %d\n", vnode_error);
+		return kIOReturnError;
+	}
+
+	// Call the recipient function
+	error = recipient(IOAccessCoreFileData, (void *)vnode_ptr, recipient_context);
+
+	// Close the kernel corefile
+	vnode_close(vnode_ptr, FREAD | FWRITE, vfs_context);
+
+	return error;
 }
 
 static void
 IOClosePolledCoreFile(void)
 {
+	// Notify kdp core that the corefile is no longer available
+	(void) kdp_core_polled_io_polled_file_unavailable();
+
 	gIOPolledCoreFileOpenRet = kIOReturnNotOpen;
 	gIOPolledCoreFileMode = kIOPolledCoreFileModeClosed;
 	IOPolledFilePollersClose(gIOPolledCoreFileVars, kIOPolledPostflightCoreDumpState);
-	IOPolledFileClose(&gIOPolledCoreFileVars, 0, NULL, 0, 0, 0);
+	IOPolledFileClose(&gIOPolledCoreFileVars, 0, NULL, 0, 0, 0, false);
+}
+
+static void
+IOUnlinkPolledCoreFile(void)
+{
+	// Notify kdp core that the corefile is no longer available
+	(void) kdp_core_polled_io_polled_file_unavailable();
+
+	gIOPolledCoreFileOpenRet = kIOReturnNotOpen;
+	gIOPolledCoreFileMode = kIOPolledCoreFileModeUnlinked;
+	IOPolledFilePollersClose(gIOPolledCoreFileVars, kIOPolledPostflightCoreDumpState);
+	IOPolledFileClose(&gIOPolledCoreFileVars, 0, NULL, 0, 0, 0, true);
 }
 
 #endif /* IOPOLLED_COREFILE */
@@ -978,6 +1378,8 @@ IOBSDMountChange(struct mount * mp, uint32_t op)
 	int pathLen;
 	vnode_t vn;
 	int result;
+
+	lck_mtx_lock(&gIOPolledCoreFileMtx);
 
 	switch (op) {
 	case kIOMountChangeMount:
@@ -1030,19 +1432,184 @@ IOBSDMountChange(struct mount * mp, uint32_t op)
 		}
 		break;
 	}
+
+	lck_mtx_unlock(&gIOPolledCoreFileMtx);
 #endif /* IOPOLLED_COREFILE */
+}
+
+extern "C" void
+IOBSDLowSpaceUnlinkKernelCore(void)
+{
+#if IOPOLLED_COREFILE
+	lck_mtx_lock(&gIOPolledCoreFileMtx);
+	if (gIOPolledCoreFileVars) {
+		thread_call_cancel_wait(corefile_open_call);
+		IOUnlinkPolledCoreFile();
+	}
+	lck_mtx_unlock(&gIOPolledCoreFileMtx);
+#endif
 }
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
+static char*
+copyOSStringAsCString(OSString *string)
+{
+	size_t string_length = 0;
+	char *c_string = NULL;
+
+	if (string == NULL) {
+		return NULL;
+	}
+	string_length = string->getLength() + 1;
+
+	/* Allocate kernel data memory for the string */
+	c_string = (char*)kalloc_data(string_length, (zalloc_flags_t)(Z_ZERO | Z_WAITOK | Z_NOFAIL));
+	assert(c_string != NULL);
+
+	/* Copy in the string */
+	strlcpy(c_string, string->getCStringNoCopy(), string_length);
+
+	return c_string;
+}
+
+extern "C" OS_ALWAYS_INLINE boolean_t
+IOCurrentTaskHasStringEntitlement(const char *entitlement, const char *value)
+{
+	return IOTaskHasStringEntitlement(NULL, entitlement, value);
+}
+
 extern "C" boolean_t
-IOTaskHasEntitlement(task_t task, const char * entitlement)
+IOTaskHasStringEntitlement(task_t task, const char *entitlement, const char *value)
+{
+	if (task == NULL) {
+		task = current_task();
+	}
+
+	/* Validate input arguments */
+	if (task == kernel_task || entitlement == NULL || value == NULL) {
+		return false;
+	}
+	proc_t proc = (proc_t)get_bsdtask_info(task);
+
+	kern_return_t ret = amfi->OSEntitlements.queryEntitlementStringWithProc(
+		proc,
+		entitlement,
+		value);
+
+	if (ret == KERN_SUCCESS) {
+		return true;
+	}
+
+	return false;
+}
+
+extern "C" OS_ALWAYS_INLINE boolean_t
+IOCurrentTaskHasEntitlement(const char *entitlement)
+{
+	return IOTaskHasEntitlement(NULL, entitlement);
+}
+
+extern "C" boolean_t
+IOTaskHasEntitlement(task_t task, const char *entitlement)
+{
+	if (task == NULL) {
+		task = current_task();
+	}
+
+	/* Validate input arguments */
+	if (task == kernel_task || entitlement == NULL) {
+		return false;
+	}
+	proc_t proc = (proc_t)get_bsdtask_info(task);
+
+	kern_return_t ret = amfi->OSEntitlements.queryEntitlementBooleanWithProc(
+		proc,
+		entitlement);
+
+	if (ret == KERN_SUCCESS) {
+		return true;
+	}
+
+	return false;
+}
+
+extern "C" OS_ALWAYS_INLINE char*
+IOCurrentTaskGetEntitlement(const char *entitlement)
+{
+	return IOTaskGetEntitlement(NULL, entitlement);
+}
+
+extern "C" char*
+IOTaskGetEntitlement(task_t task, const char *entitlement)
+{
+	void *entitlement_object = NULL;
+	char *return_value = NULL;
+
+	if (task == NULL) {
+		task = current_task();
+	}
+
+	/* Validate input arguments */
+	if (task == kernel_task || entitlement == NULL) {
+		return NULL;
+	}
+	proc_t proc = (proc_t)get_bsdtask_info(task);
+
+	kern_return_t ret = amfi->OSEntitlements.copyEntitlementAsOSObjectWithProc(
+		proc,
+		entitlement,
+		&entitlement_object);
+
+	if (ret != KERN_SUCCESS) {
+		return NULL;
+	}
+	assert(entitlement_object != NULL);
+
+	OSObject *os_object = (OSObject*)entitlement_object;
+	OSString *os_string = OSDynamicCast(OSString, os_object);
+
+	/* Get a C string version of the OSString */
+	return_value = copyOSStringAsCString(os_string);
+
+	/* Free the OSObject which was given to us */
+	OSSafeReleaseNULL(os_object);
+
+	return return_value;
+}
+
+extern "C" boolean_t
+IOVnodeHasEntitlement(vnode_t vnode, int64_t off, const char *entitlement)
 {
 	OSObject * obj;
-	obj = IOUserClient::copyClientEntitlement(task, entitlement);
+	off_t offset = (off_t)off;
+
+	obj = IOUserClient::copyClientEntitlementVnode(vnode, offset, entitlement);
 	if (!obj) {
 		return false;
 	}
 	obj->release();
 	return obj != kOSBooleanFalse;
+}
+
+extern "C" char *
+IOVnodeGetEntitlement(vnode_t vnode, int64_t off, const char *entitlement)
+{
+	OSObject *obj = NULL;
+	OSString *str = NULL;
+	size_t len;
+	char *value = NULL;
+	off_t offset = (off_t)off;
+
+	obj = IOUserClient::copyClientEntitlementVnode(vnode, offset, entitlement);
+	if (obj != NULL) {
+		str = OSDynamicCast(OSString, obj);
+		if (str != NULL) {
+			len = str->getLength() + 1;
+			value = (char *)kalloc_data(len, Z_WAITOK);
+			strlcpy(value, str->getCStringNoCopy(), len);
+		}
+		obj->release();
+	}
+	return value;
 }

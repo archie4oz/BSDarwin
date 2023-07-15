@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -71,6 +71,8 @@
 #define _NETINET_IN_PCB_H_
 #include <sys/appleapiopts.h>
 
+#include <netinet/in.h>
+#include <sys/socketvar.h>
 #include <sys/types.h>
 #include <sys/queue.h>
 #ifdef BSD_KERNEL_PRIVATE
@@ -80,6 +82,9 @@
 #include <kern/zalloc.h>
 #include <netinet/in_stat.h>
 #endif /* BSD_KERNEL_PRIVATE */
+#if !KERNEL
+#include <TargetConditionals.h>
+#endif
 
 #if IPSEC
 #include <netinet6/ipsec.h> /* for IPSEC */
@@ -89,6 +94,9 @@
 #include <net/necp.h>
 #endif
 
+#if SKYWALK
+#include <skywalk/namespace/netns.h>
+#endif /* SKYWALK */
 
 #ifdef BSD_KERNEL_PRIVATE
 /*
@@ -122,9 +130,6 @@ struct in_addr_4in6 {
  * stable.
  */
 struct  icmp6_filter;
-#if CONFIG_MACF_NET
-struct  label;
-#endif
 struct ifnet;
 
 struct inp_stat {
@@ -132,6 +137,14 @@ struct inp_stat {
 	u_int64_t       rxbytes;
 	u_int64_t       txpackets;
 	u_int64_t       txbytes;
+};
+
+struct inp_necp_attributes {
+	char *inp_domain;
+	char *inp_account;
+	char *inp_domain_owner;
+	char *inp_tracker_domain;
+	char *inp_domain_context;
 };
 
 /*
@@ -158,6 +171,8 @@ struct inpcb {
 	u_int32_t inp_flags;            /* generic IP/datagram flags */
 	u_int32_t inp_flags2;           /* generic IP/datagram flags #2 */
 	u_int32_t inp_flow;             /* IPv6 flow information */
+	uint32_t inp_lifscope;          /* IPv6 scope ID of the local address */
+	uint32_t inp_fifscope;          /* IPv6 scope ID of the foreign address */
 
 	u_char  inp_sndinprog_cnt;      /* outstanding send operations */
 	uint32_t inp_sndingprog_waiters;/* waiters for outstanding send */
@@ -208,22 +223,26 @@ struct inpcb {
 		short   inp6_hops;
 	} inp_depend6;
 
+	uint64_t inp_fadv_flow_ctrl_cnt;
+	uint64_t inp_fadv_suspended_cnt;
+
 	caddr_t inp_saved_ppcb;         /* place to save pointer while cached */
-#if CONFIG_MACF_NET
-	struct label *inp_label;        /* MAC label */
-#endif
 #if IPSEC
 	struct inpcbpolicy *inp_sp;     /* for IPsec */
 #endif /* IPSEC */
 #if NECP
-	struct {
-		char *inp_domain;
-		char *inp_account;
-	} inp_necp_attributes;
+	struct inp_necp_attributes inp_necp_attributes;
 	struct necp_inpcb_result inp_policyresult;
 	uuid_t necp_client_uuid;
 	necp_client_flow_cb necp_cb;
+	u_int8_t *inp_resolver_signature;
+	size_t inp_resolver_signature_length;
 #endif
+#if SKYWALK
+	netns_token inp_netns_token;    /* shared namespace state */
+	/* optional IPv4 wildcard namespace reservation for an IPv6 socket */
+	netns_token inp_wildcard_netns_token;
+#endif /* SKYWALK */
 	u_char *inp_keepalive_data;     /* for keepalive offload */
 	u_int8_t inp_keepalive_datalen; /* keepalive data length */
 	u_int8_t inp_keepalive_type;    /* type of application */
@@ -376,7 +395,7 @@ struct  xinpcb {
 	u_quad_t        xi_alignment_hack;
 };
 
-#if !CONFIG_EMBEDDED
+#if XNU_TARGET_OS_OSX || KERNEL || !(TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR)
 struct inpcb64_list_entry {
 	u_int64_t   le_next;
 	u_int64_t   le_prev;
@@ -418,7 +437,7 @@ struct  xinpcb64 {
 	struct  xsocket64 xi_socket;
 	u_quad_t        xi_alignment_hack;
 };
-#endif /* !CONFIG_EMBEDDED */
+#endif /* XNU_TARGET_OS_OSX || KERNEL || !(TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR) */
 
 #ifdef PRIVATE
 struct xinpcb_list_entry {
@@ -475,6 +494,7 @@ struct  xinpgen {
  */
 #define INP_IPV4        0x1
 #define INP_IPV6        0x2
+#define INP_V4MAPPEDV6  0x4
 #define inp_faddr       inp_dependfaddr.inp46_foreign.ia46_addr4
 #define inp_laddr       inp_dependladdr.inp46_local.ia46_addr4
 #define in6p_faddr      inp_dependfaddr.inp6_foreign
@@ -555,7 +575,7 @@ struct inpcbinfo {
 	/*
 	 * Per-protocol lock protecting pcb list, pcb count, etc.
 	 */
-	lck_rw_t                *ipi_lock;
+	lck_rw_t                ipi_lock;
 
 	/*
 	 * List and count of pcbs on the protocol.
@@ -584,7 +604,11 @@ struct inpcbinfo {
 	/*
 	 * Zone from which inpcbs are allocated for this protocol.
 	 */
+#if BSD_KERNEL_PRIVATE
+	zone_or_view_t           ipi_zone;
+#else
 	struct zone             *ipi_zone;
+#endif
 
 	/*
 	 * Per-protocol hash of pcbs, hashed by local and foreign
@@ -602,9 +626,8 @@ struct inpcbinfo {
 	/*
 	 * Misc.
 	 */
-	lck_attr_t              *ipi_lock_attr;
+	lck_attr_t              ipi_lock_attr;
 	lck_grp_t               *ipi_lock_grp;
-	lck_grp_attr_t          *ipi_lock_grp_attr;
 
 #define INPCBINFO_UPDATE_MSS    0x1
 #define INPCBINFO_HANDLE_LQM_ABORT      0x2
@@ -685,7 +708,7 @@ struct inpcbinfo {
 
 #ifdef BSD_KERNEL_PRIVATE
 #define IN6P_RFC2292            0x02000000 /* used RFC2292 API on the socket */
-#define IN6P_MTU                0x04000000 /* receive path MTU */
+#define IN6P_MTU                0x04000000 /* receive path MTU for IPv6 */
 #define INP_PKTINFO             0x08000000 /* rcv and snd PKTINFO for IPv4 */
 #define INP_FLOW_SUSPENDED      0x10000000 /* flow suspended */
 #define INP_NO_IFT_CELLULAR     0x20000000 /* do not use cellular interface */
@@ -717,6 +740,8 @@ struct inpcbinfo {
 #define INP2_CLAT46_FLOW        0x00000200 /* The flow is going to use CLAT46 path */
 #define INP2_EXTERNAL_PORT      0x00000400 /* The port is registered externally, for NECP listeners */
 #define INP2_NO_IFF_CONSTRAINED 0x00000800 /* do not use constrained interface */
+#define INP2_DONTFRAG           0x00001000 /* mark the DF bit in the IP header to avoid fragmentation */
+#define INP2_SCOPED_BY_NECP     0x00002000 /* NECP scoped the pcb */
 
 /*
  * Flags passed to in_pcblookup*() functions.
@@ -734,6 +759,8 @@ extern int ipport_firstauto;
 extern int ipport_lastauto;
 extern int ipport_hifirstauto;
 extern int ipport_hilastauto;
+extern int allow_udp_port_exhaustion;
+#define UDP_RANDOM_PORT_RESERVE   4096
 
 /* freshly allocated PCB, it's in use */
 #define INPCB_STATE_INUSE       0x1
@@ -791,13 +818,13 @@ extern int in_getsockaddr_s(struct socket *, struct sockaddr_in *);
 extern int in_pcb_checkstate(struct inpcb *, int, int);
 extern void in_pcbremlists(struct inpcb *);
 extern void inpcb_to_compat(struct inpcb *, struct inpcb_compat *);
-#if !CONFIG_EMBEDDED
+#if XNU_TARGET_OS_OSX
 extern void inpcb_to_xinpcb64(struct inpcb *, struct xinpcb64 *);
-#endif
+#endif /* XNU_TARGET_OS_OSX */
 
 extern int get_pcblist_n(short, struct sysctl_req *, struct inpcbinfo *);
 
-extern void inpcb_get_ports_used(u_int32_t, int, u_int32_t, bitstr_t *,
+extern void inpcb_get_ports_used(ifnet_t, int, u_int32_t, bitstr_t *,
     struct inpcbinfo *);
 #define INPCB_OPPORTUNISTIC_THROTTLEON  0x0001
 #define INPCB_OPPORTUNISTIC_SETCMD      0x0002
@@ -826,6 +853,7 @@ extern u_int32_t inp_calc_flowhash(struct inpcb *);
 extern void inp_reset_fc_state(struct inpcb *);
 extern int inp_set_fc_state(struct inpcb *, int advcode);
 extern void inp_fc_unthrottle_tcp(struct inpcb *);
+extern void inp_fc_throttle_tcp(struct inpcb *inp);
 extern void inp_flowadv(uint32_t);
 extern int inp_flush(struct inpcb *, int);
 extern int inp_findinpcb_procinfo(struct inpcbinfo *, uint32_t, struct so_procinfo *);
@@ -844,9 +872,14 @@ extern void inp_set_activity_bitmap(struct inpcb *inp);
 extern void inp_get_activity_bitmap(struct inpcb *inp, activity_bitmap_t *b);
 extern void inp_update_last_owner(struct socket *so, struct proc *p, struct proc *ep);
 extern void inp_copy_last_owner(struct socket *so, struct socket *head);
+#if SKYWALK
+extern void inp_update_netns_flags(struct socket *so);
+#endif /* SKYWALK */
 #endif /* BSD_KERNEL_PRIVATE */
 #ifdef KERNEL_PRIVATE
 /* exported for PPP */
 extern void inp_clear_INP_INADDR_ANY(struct socket *);
+extern int inp_limit_companion_link(struct inpcbinfo *pcbinfo, u_int32_t limit);
+extern int inp_recover_companion_link(struct inpcbinfo *pcbinfo);
 #endif /* KERNEL_PRIVATE */
 #endif /* !_NETINET_IN_PCB_H_ */

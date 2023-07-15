@@ -52,7 +52,10 @@
  * tmp5 - scratch register 5
  */
 /* BEGIN IGNORE CODESTYLE */
-.macro  AUTH_THREAD_STATE_IN_X0	tmp1, tmp2, tmp3, tmp4, tmp5, el0_state_allowed=0
+.macro AUTH_THREAD_STATE_IN_X0 tmp1, tmp2, tmp3, tmp4, tmp5, el0_state_allowed=0
+#if __has_feature(ptrauth_calls)
+	msr		SPSel, #1
+#endif
 	ldr		w2, [x0, SS64_CPSR]
 .if \el0_state_allowed==0
 #if __has_feature(ptrauth_calls)
@@ -86,6 +89,7 @@
 	bl		EXT(ml_check_signed_state)
 	mov		x1, \tmp1
 	mov		x2, \tmp2
+	msr		SPSel, #0
 
 .if \el0_state_allowed==0
 	and		\tmp2, \tmp2, #PSR64_MODE_MASK

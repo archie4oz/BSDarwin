@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2020 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -144,7 +144,6 @@ extern vm_fault_return_t vm_fault_page(
 	/* More arguments: */
 	kern_return_t   *error_code,            /* code if page is in error */
 	boolean_t       no_zero_fill,           /* don't fill absent pages */
-	boolean_t       data_supply,            /* treat as data_supply */
 	vm_object_fault_info_t fault_info);
 
 extern void vm_fault_cleanup(
@@ -165,7 +164,8 @@ extern void vm_fault_unwire(
 	vm_map_entry_t  entry,
 	boolean_t       deallocate,
 	pmap_t          pmap,
-	vm_map_offset_t pmap_addr);
+	vm_map_offset_t pmap_addr,
+	vm_map_offset_t end_addr);
 
 extern kern_return_t    vm_fault_copy(
 	vm_object_t             src_object,
@@ -181,6 +181,8 @@ extern kern_return_t vm_fault_enter(
 	vm_page_t m,
 	pmap_t pmap,
 	vm_map_offset_t vaddr,
+	vm_map_size_t fault_page_size,
+	vm_map_offset_t fault_phys_offset,
 	vm_prot_t prot,
 	vm_prot_t fault_type,
 	boolean_t wired,
@@ -193,8 +195,6 @@ extern kern_return_t vm_fault_enter(
 extern vm_offset_t kdp_lightweight_fault(
 	vm_map_t map,
 	vm_offset_t cur_target_addr);
-
-extern void vm_rtfault_record_init(void);
 
 #endif  /* MACH_KERNEL_PRIVATE */
 

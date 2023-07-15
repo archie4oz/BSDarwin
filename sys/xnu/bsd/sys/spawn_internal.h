@@ -48,6 +48,7 @@
 #include <mach/port.h>
 #include <mach/exception_types.h>
 #include <mach/coalition.h>     /* COALITION_NUM_TYPES */
+#include <mach/task_policy.h>
 #include <os/overflow.h>
 
 /*
@@ -77,7 +78,7 @@ typedef enum {
 	PSPA_AU_SESSION = 2,
 	PSPA_IMP_WATCHPORTS = 3,
 	PSPA_REGISTERED_PORTS = 4,
-	PSPA_SUID_CRED = 6,
+	PSPA_PTRAUTH_TASK_PORT = 5,
 } pspa_t;
 
 /*
@@ -117,8 +118,10 @@ typedef struct _posix_spawn_port_actions {
 typedef struct _ps_mac_policy_extension {
 	char                    policyname[128];
 	union {
+		/* Address of the user space data passed into kernel space */
 		uint64_t        data;
-		void            *datap;         /* pointer in kernel memory */
+		/* In kernel space, offset into the pool of all extensions' data */
+		uint64_t        dataoff;
 	};
 	uint64_t                datalen;
 } _ps_mac_policy_extension_t;
@@ -184,8 +187,8 @@ struct _posix_spawn_persona_info {
 };
 
 #define POSIX_SPAWN_PERSONA_FLAGS_NONE      0x0
-#define POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE  0x1
-#define POSIX_SPAWN_PERSONA_FLAGS_VERIFY    0x2
+#define POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE  0x1 /* noop, the only option */
+#define POSIX_SPAWN_PERSONA_FLAGS_VERIFY    0x2 /* noop, unimplemented */
 
 #define POSIX_SPAWN_PERSONA_ALL_FLAGS \
 	(POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE \
@@ -227,10 +230,28 @@ typedef struct _posix_spawnattr {
 	int         psa_memlimit_inactive;      /* jetsam memory limit (in MB) when process is inactive */
 
 	uint64_t        psa_qos_clamp;          /* QoS Clamp to set on the new process */
-	uint64_t        psa_darwin_role;           /* PRIO_DARWIN_ROLE to set on the new process */
+	task_role_t     psa_darwin_role;           /* PRIO_DARWIN_ROLE to set on the new process */
 	int             psa_thread_limit;       /* thread limit */
 
 	uint64_t        psa_max_addr;           /* Max valid VM address */
+	bool            psa_no_smt;
+	bool            psa_tecs;
+	int             psa_platform;           /* Plaform for the binary */
+
+	cpu_subtype_t      psa_subcpuprefs[NBINPREFS];   /* subcpu affinity prefs*/
+	uint32_t        psa_options;             /* More options to be passed to posix_spawn */
+	uint32_t        psa_port_soft_limit;     /* port space soft limit */
+	uint32_t        psa_port_hard_limit;     /* port space hard limit */
+	uint32_t        psa_filedesc_soft_limit; /* file descriptor soft limit */
+	uint32_t        psa_filedesc_hard_limit; /* file descriptor hard limit */
+	uint32_t        psa_crash_behavior;      /* crash behavior flags */
+	int             psa_dataless_iopolicy;   /* materialize dataless iopolicy parameter */
+	uint64_t        psa_crash_behavior_deadline; /* crash behavior deadline */
+	uint8_t         psa_launch_type;         /* type of launch for launch constraint enforcement */
+
+	/* For exponential backoff */
+	uint32_t        psa_crash_count;
+	uint32_t        psa_throttle_timeout;
 
 	/*
 	 * NOTE: Extensions array pointers must stay at the end so that
@@ -242,6 +263,7 @@ typedef struct _posix_spawnattr {
 	struct _posix_spawn_coalition_info *psa_coalition_info;  /* coalition info */
 	struct _posix_spawn_persona_info   *psa_persona_info;    /* spawn new process into given persona */
 	struct _posix_spawn_posix_cred_info *psa_posix_cred_info; /* posix creds: uid/gid/groups */
+	char                                *psa_subsystem_root_path; /* pass given path in apple strings */
 } *_posix_spawnattr_t;
 
 /*
@@ -312,7 +334,7 @@ typedef struct _posix_spawnattr {
 #define POSIX_SPAWN_PROC_TYPE_MASK                  0x00000F00
 
 #define POSIX_SPAWN_PROC_TYPE_APP_DEFAULT           0x00000100
-#define POSIX_SPAWN_PROC_TYPE_APP_TAL               0x00000200
+#define POSIX_SPAWN_PROC_TYPE_APP_TAL               0x00000200 /* unused */
 
 #define POSIX_SPAWN_PROC_TYPE_DAEMON_STANDARD       0x00000300
 #define POSIX_SPAWN_PROC_TYPE_DAEMON_INTERACTIVE    0x00000400
@@ -331,6 +353,14 @@ typedef struct _posix_spawnattr {
 /* Setting to indicate no change to darwin role */
 #define POSIX_SPAWN_DARWIN_ROLE_NONE                0x00000000
 /* Other possible values are specified by PRIO_DARWIN_ROLE in sys/resource.h */
+
+/* Other posix spawn options passed through psa_options */
+__options_decl(posix_spawn_options, uint32_t, {
+	PSA_OPTION_NONE                         = 0,
+	PSA_OPTION_PLUGIN_HOST_DISABLE_A_KEYS   = 0x1,
+	PSA_OPTION_ALT_ROSETTA                  = 0x2,
+	PSA_OPTION_DATALESS_IOPOLICY            = 0x4,
+});
 
 /*
  * Allowable posix_spawn() file actions
@@ -365,7 +395,7 @@ typedef struct _psfa_action {
 		mach_port_name_t psfaa_fileport;    /* fileport to operate on */
 	};
 	union {
-		struct _psfaa_open {
+		struct {
 			int     psfao_oflag;            /* open flags to use */
 			mode_t  psfao_mode;             /* mode for open */
 			char    psfao_path[PATH_MAX];   /* path to open */
@@ -445,6 +475,9 @@ struct _posix_spawn_args_desc {
 
 	__darwin_size_t posix_cred_info_size;
 	struct _posix_spawn_posix_cred_info *posix_cred_info;
+
+	__darwin_size_t subsystem_root_path_size;
+	char *subsystem_root_path;
 };
 
 #ifdef KERNEL
@@ -470,6 +503,8 @@ struct user32__posix_spawn_args_desc {
 	uint32_t        persona_info;
 	uint32_t        posix_cred_info_size;
 	uint32_t        posix_cred_info;
+	uint32_t        subsystem_root_path_size;
+	uint32_t        subsystem_root_path;
 };
 
 struct user__posix_spawn_args_desc {
@@ -487,6 +522,8 @@ struct user__posix_spawn_args_desc {
 	user_addr_t     persona_info;
 	user_size_t     posix_cred_info_size;
 	user_addr_t     posix_cred_info;
+	user_size_t     subsystem_root_path_size;
+	user_addr_t     subsystem_root_path;
 };
 
 

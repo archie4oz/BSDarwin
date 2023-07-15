@@ -65,6 +65,11 @@
 #ifndef _KERN_MACRO_HELP_H_
 #define _KERN_MACRO_HELP_H_
 
+#if DRIVERKIT_FRAMEWORK_INCLUDE
+#define         NEVER           false
+#define         ALWAYS          true
+#else
+
 #include <mach/boolean.h>
 
 #ifdef  lint
@@ -74,6 +79,9 @@ boolean_t       ALWAYS;
 #define         NEVER           FALSE
 #define         ALWAYS          TRUE
 #endif  /* lint */
+
+#endif /* DRIVERKIT_FRAMEWORK_INCLUDE */
+
 
 #define         MACRO_BEGIN     do {
 #define         MACRO_END       } while (NEVER)

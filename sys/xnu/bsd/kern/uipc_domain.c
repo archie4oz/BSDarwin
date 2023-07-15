@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998-2018 Apple Inc. All rights reserved.
+ * Copyright (c) 1998-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -100,11 +100,12 @@ static boolean_t domain_draining;
 static void domain_sched_timeout(void);
 static void domain_timeout(void *);
 
-lck_grp_t       *domain_proto_mtx_grp;
-lck_attr_t      *domain_proto_mtx_attr;
-static lck_grp_attr_t   *domain_proto_mtx_grp_attr;
-decl_lck_mtx_data(static, domain_proto_mtx);
-decl_lck_mtx_data(static, domain_timeout_mtx);
+static LCK_GRP_DECLARE(domain_proto_mtx_grp, "domain");
+static LCK_ATTR_DECLARE(domain_proto_mtx_attr, 0, 0);
+static LCK_MTX_DECLARE_ATTR(domain_proto_mtx,
+    &domain_proto_mtx_grp, &domain_proto_mtx_attr);
+static LCK_MTX_DECLARE_ATTR(domain_timeout_mtx,
+    &domain_proto_mtx_grp, &domain_proto_mtx_attr);
 
 u_int64_t _net_uptime;
 u_int64_t _net_uptime_ms;
@@ -196,8 +197,8 @@ init_domain(struct domain *dp)
 	VERIFY(dp->dom_flags & DOM_ATTACHED);
 
 	if (!(dp->dom_flags & DOM_INITIALIZED)) {
-		lck_mtx_init(&dp->dom_mtx_s, domain_proto_mtx_grp,
-		    domain_proto_mtx_attr);
+		lck_mtx_init(&dp->dom_mtx_s, &domain_proto_mtx_grp,
+		    &domain_proto_mtx_attr);
 		dp->dom_mtx = &dp->dom_mtx_s;
 		TAILQ_INIT(&dp->dom_protosw);
 		if (dp->dom_init != NULL) {
@@ -207,15 +208,15 @@ init_domain(struct domain *dp)
 	}
 
 	/* Recompute for new protocol */
-	if (_max_linkhdr < 16) {        /* XXX - Sheesh; everything's ether? */
-		_max_linkhdr = 16;
+	if (max_linkhdr < 16) {        /* XXX - Sheesh; everything's ether? */
+		max_linkhdr = 16;
 	}
-	_max_linkhdr = max_linkhdr;     /* round it up */
+	max_linkhdr = (int)P2ROUNDUP(max_linkhdr, sizeof(uint32_t));
 
-	if (dp->dom_protohdrlen > _max_protohdr) {
-		_max_protohdr = dp->dom_protohdrlen;
+	if (dp->dom_protohdrlen > max_protohdr) {
+		max_protohdr = dp->dom_protohdrlen;
 	}
-	_max_protohdr = max_protohdr;   /* round it up */
+	max_protohdr = (int)P2ROUNDUP(max_protohdr, sizeof(uint32_t));
 
 	max_hdr = max_linkhdr + max_protohdr;
 	max_datalen = MHLEN - max_hdr;
@@ -267,7 +268,7 @@ net_add_domain_old(struct domain_old *odp)
 		 * as the caller would not have been able to handle
 		 * any failures otherwise.
 		 */
-		panic("%s: domain (%d,%s) already exists for %s\n", __func__,
+		panic("%s: domain (%d,%s) already exists for %s", __func__,
 		    dp->dom_family, dp->dom_name, odp->dom_name);
 		/* NOTREACHED */
 	}
@@ -290,17 +291,7 @@ net_add_domain_old(struct domain_old *odp)
 		/* NOTREACHED */
 	}
 
-	dp = _MALLOC(sizeof(*dp), M_TEMP, M_WAITOK | M_ZERO);
-	if (dp == NULL) {
-		/*
-		 * There is really nothing better than to panic here,
-		 * as the caller would not have been able to handle
-		 * any failures otherwise.
-		 */
-		panic("%s: unable to allocate memory for domain family "
-		    "%d (%s)\n", __func__, odp->dom_family, odp->dom_name);
-		/* NOTREACHED */
-	}
+	dp = kalloc_type(struct domain, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
 	/* Copy everything but dom_init, dom_mtx, dom_next and dom_refs */
 	dp->dom_family          = odp->dom_family;
@@ -360,15 +351,15 @@ net_del_domain_old(struct domain_old *odp)
 		TAILQ_FOREACH_SAFE(pp1, &dp1->dom_protosw, pr_entry, pp2) {
 			detach_proto(pp1, dp1);
 			if (pp1->pr_usrreqs->pru_flags & PRUF_OLD) {
-				FREE(pp1->pr_usrreqs, M_TEMP);
+				kfree_type(struct pr_usrreqs, pp1->pr_usrreqs);
 			}
 			if (pp1->pr_flags & PR_OLD) {
-				FREE(pp1, M_TEMP);
+				kfree_type(struct protosw, pp1);
 			}
 		}
 
 		detach_domain(dp1);
-		FREE(dp1, M_TEMP);
+		kfree_type(struct domain, dp1);
 	} else {
 		error = EPFNOSUPPORT;
 	}
@@ -398,13 +389,13 @@ net_add_proto(struct protosw *pp, struct domain *dp, int doinit)
 
 	/* pr_domain is set only after the protocol is attached */
 	if (pp->pr_domain != NULL) {
-		panic("%s: domain (%d,%s), proto %d has non-NULL pr_domain!\n",
+		panic("%s: domain (%d,%s), proto %d has non-NULL pr_domain!",
 		    __func__, dp->dom_family, dp->dom_name, pp->pr_protocol);
 		/* NOTREACHED */
 	}
 
 	if (pp->pr_usrreqs == NULL) {
-		panic("%s: domain (%d,%s), proto %d has no usrreqs!\n",
+		panic("%s: domain (%d,%s), proto %d has no usrreqs!",
 		    __func__, dp->dom_family, dp->dom_name, pp->pr_protocol);
 		/* NOTREACHED */
 	}
@@ -480,16 +471,12 @@ net_add_proto_old(struct protosw_old *opp, struct domain_old *odp)
 	}
 
 	if ((opru = opp->pr_usrreqs) == NULL) {
-		panic("%s: domain (%d,%s), proto %d has no usrreqs!\n",
+		panic("%s: domain (%d,%s), proto %d has no usrreqs!",
 		    __func__, odp->dom_family, odp->dom_name, opp->pr_protocol);
 		/* NOTREACHED */
 	}
 
-	pru = _MALLOC(sizeof(*pru), M_TEMP, M_WAITOK | M_ZERO);
-	if (pru == NULL) {
-		error = ENOMEM;
-		goto done;
-	}
+	pru = kalloc_type(struct pr_usrreqs, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
 	pru->pru_flags          = PRUF_OLD;
 	pru->pru_abort          = opru->pru_abort;
@@ -513,11 +500,7 @@ net_add_proto_old(struct protosw_old *opp, struct domain_old *odp)
 	pru->pru_soreceive      = opru->pru_soreceive;
 	pru->pru_sopoll         = opru->pru_sopoll;
 
-	pp = _MALLOC(sizeof(*pp), M_TEMP, M_WAITOK | M_ZERO);
-	if (pp == NULL) {
-		error = ENOMEM;
-		goto done;
-	}
+	pp = kalloc_type(struct protosw, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
 	/*
 	 * Protocol fast and slow timers are now deprecated.
@@ -559,12 +542,8 @@ done:
 		    "error %d\n", __func__, odp->dom_family,
 		    odp->dom_name, opp->pr_protocol, error);
 
-		if (pru != NULL) {
-			FREE(pru, M_TEMP);
-		}
-		if (pp != NULL) {
-			FREE(pp, M_TEMP);
-		}
+		kfree_type(struct pr_usrreqs, pru);
+		kfree_type(struct protosw, pp);
 	}
 
 	domain_guard_release(guard);
@@ -602,10 +581,10 @@ net_del_proto(int type, int protocol, struct domain *dp)
 
 	detach_proto(pp, dp);
 	if (pp->pr_usrreqs->pru_flags & PRUF_OLD) {
-		FREE(pp->pr_usrreqs, M_TEMP);
+		kfree_type(struct pr_usrreqs, pp->pr_usrreqs);
 	}
 	if (pp->pr_flags & PR_OLD) {
-		FREE(pp, M_TEMP);
+		kfree_type(struct protosw, pp);
 	}
 
 	return 0;
@@ -653,10 +632,10 @@ net_del_proto_old(int type, int protocol, struct domain_old *odp)
 	}
 	detach_proto(pp, dp);
 	if (pp->pr_usrreqs->pru_flags & PRUF_OLD) {
-		FREE(pp->pr_usrreqs, M_TEMP);
+		kfree_type(struct pr_usrreqs, pp->pr_usrreqs);
 	}
 	if (pp->pr_flags & PR_OLD) {
-		FREE(pp, M_TEMP);
+		kfree_type(struct protosw, pp);
 	}
 
 done:
@@ -684,15 +663,14 @@ net_drain_domains(void)
 	lck_mtx_unlock(&domain_timeout_mtx);
 }
 
-#if INET6
 extern struct domain inet6domain_s;
-#endif
 #if IPSEC
 extern struct domain keydomain_s;
 #endif
 
 extern struct domain routedomain_s, ndrvdomain_s, inetdomain_s;
 extern struct domain systemdomain_s, localdomain_s;
+extern struct domain vsockdomain_s;
 
 #if MULTIPATH
 extern struct domain mpdomain_s;
@@ -737,23 +715,6 @@ domaininit(void)
 	domain_guard_t guard;
 
 	eventhandler_lists_ctxt_init(&protoctl_evhdlr_ctxt);
-	/*
-	 * allocate lock group attribute and group for domain mutexes
-	 */
-	domain_proto_mtx_grp_attr = lck_grp_attr_alloc_init();
-
-	domain_proto_mtx_grp = lck_grp_alloc_init("domain",
-	    domain_proto_mtx_grp_attr);
-
-	/*
-	 * allocate the lock attribute for per domain mutexes
-	 */
-	domain_proto_mtx_attr = lck_attr_alloc_init();
-
-	lck_mtx_init(&domain_proto_mtx, domain_proto_mtx_grp,
-	    domain_proto_mtx_attr);
-	lck_mtx_init(&domain_timeout_mtx, domain_proto_mtx_grp,
-	    domain_proto_mtx_attr);
 
 	guard = domain_guard_deploy();
 	/*
@@ -764,9 +725,7 @@ domaininit(void)
 	 * dom_rtattach() called on rt_tables[].
 	 */
 	attach_domain(&inetdomain_s);
-#if INET6
 	attach_domain(&inet6domain_s);
-#endif /* INET6 */
 #if MULTIPATH
 	attach_domain(&mpdomain_s);
 #endif /* MULTIPATH */
@@ -776,6 +735,7 @@ domaininit(void)
 	attach_domain(&keydomain_s);
 #endif /* IPSEC */
 	attach_domain(&ndrvdomain_s);
+	attach_domain(&vsockdomain_s);
 	attach_domain(&routedomain_s);  /* must be last domain */
 
 	/*
@@ -1031,7 +991,7 @@ net_uptime2timeval(struct timeval *tv)
 	}
 
 	tv->tv_usec = 0;
-	tv->tv_sec = net_uptime();
+	tv->tv_sec = (time_t)net_uptime();
 }
 
 /*
@@ -1131,6 +1091,77 @@ domain_unguard_release(domain_unguard_t unguard)
 	}
 }
 
+#if SKYWALK
+/* The following is used to enqueue work items for interface events */
+struct protoctl_event {
+	struct ifnet *ifp;
+	union sockaddr_in_4_6 laddr;
+	union sockaddr_in_4_6 raddr;
+	uint32_t protoctl_event_code;
+	struct protoctl_ev_val val;
+	uint16_t lport;
+	uint16_t rport;
+	uint8_t protocol;
+};
+
+struct protoctl_event_nwk_wq_entry {
+	struct nwk_wq_entry nwk_wqe;
+	struct protoctl_event protoctl_ev_arg;
+};
+
+static void
+protoctl_event_callback(struct nwk_wq_entry *nwk_item)
+{
+	struct protoctl_event_nwk_wq_entry *p_ev = NULL;
+
+	p_ev = __container_of(nwk_item, struct protoctl_event_nwk_wq_entry, nwk_wqe);
+
+	/* Call this before we walk the tree */
+	EVENTHANDLER_INVOKE(&protoctl_evhdlr_ctxt, protoctl_event,
+	    p_ev->protoctl_ev_arg.ifp, (struct sockaddr *)&(p_ev->protoctl_ev_arg.laddr),
+	    (struct sockaddr *)&(p_ev->protoctl_ev_arg.raddr),
+	    p_ev->protoctl_ev_arg.lport, p_ev->protoctl_ev_arg.rport,
+	    p_ev->protoctl_ev_arg.protocol, p_ev->protoctl_ev_arg.protoctl_event_code,
+	    &p_ev->protoctl_ev_arg.val);
+
+	kfree_type(struct protoctl_event_nwk_wq_entry, p_ev);
+}
+
+/* XXX Some PRC events needs extra verification like sequence number checking */
+void
+protoctl_event_enqueue_nwk_wq_entry(struct ifnet *ifp, struct sockaddr *p_laddr,
+    struct sockaddr *p_raddr, uint16_t lport, uint16_t rport, uint8_t protocol,
+    uint32_t protoctl_event_code, struct protoctl_ev_val *p_protoctl_ev_val)
+{
+	struct protoctl_event_nwk_wq_entry *p_protoctl_ev = NULL;
+
+	p_protoctl_ev = kalloc_type(struct protoctl_event_nwk_wq_entry,
+	    Z_WAITOK | Z_ZERO | Z_NOFAIL);
+
+	p_protoctl_ev->protoctl_ev_arg.ifp = ifp;
+	if (p_laddr != NULL) {
+		VERIFY(p_laddr->sa_len <= sizeof(p_protoctl_ev->protoctl_ev_arg.laddr));
+		bcopy(p_laddr, &(p_protoctl_ev->protoctl_ev_arg.laddr), p_laddr->sa_len);
+	}
+
+	if (p_raddr != NULL) {
+		VERIFY(p_raddr->sa_len <= sizeof(p_protoctl_ev->protoctl_ev_arg.raddr));
+		bcopy(p_raddr, &(p_protoctl_ev->protoctl_ev_arg.raddr), p_raddr->sa_len);
+	}
+	p_protoctl_ev->protoctl_ev_arg.lport = lport;
+	p_protoctl_ev->protoctl_ev_arg.rport = rport;
+	p_protoctl_ev->protoctl_ev_arg.protocol = protocol;
+	p_protoctl_ev->protoctl_ev_arg.protoctl_event_code = protoctl_event_code;
+
+	if (p_protoctl_ev_val != NULL) {
+		bcopy(p_protoctl_ev_val, &(p_protoctl_ev->protoctl_ev_arg.val),
+		    sizeof(*p_protoctl_ev_val));
+	}
+	p_protoctl_ev->nwk_wqe.func = protoctl_event_callback;
+
+	nwk_wq_enqueue(&p_protoctl_ev->nwk_wqe);
+}
+#endif /* SKYWALK */
 
 #if (DEVELOPMENT || DEBUG)
 

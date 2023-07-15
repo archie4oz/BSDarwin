@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2008-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -75,28 +75,21 @@
 #include <kern/locks.h>
 
 #include <net/if.h>
+#include <net/multi_layer_pkt_log.h>
 #include <net/route.h>
 
 #include <netinet/in.h>
 #include <netinet/in_var.h>
-#if INET6
 #include <netinet/ip6.h>
 #include <netinet6/ip6_var.h>
 #include <netinet/icmp6.h>
-#endif
 
 #include <netinet6/ipsec.h>
-#if INET6
 #include <netinet6/ipsec6.h>
-#endif
 #include <netinet6/ah.h>
-#if INET6
 #include <netinet6/ah6.h>
-#endif
 #include <netinet6/esp.h>
-#if INET6
 #include <netinet6/esp6.h>
-#endif
 #include <netinet6/esp_rijndael.h>
 #include <netinet6/esp_chachapoly.h>
 #include <net/pfkeyv2.h>
@@ -112,7 +105,6 @@
 #define DBG_FNC_ESPAUTH         NETDBG_CODE(DBG_NETIPSEC, (8 << 8))
 #define MAX_SBUF_LEN            2000
 
-extern lck_mtx_t *sadb_mutex;
 os_log_t esp_mpkl_log_object = NULL;
 
 static int esp_null_mature(struct secasvar *);
@@ -125,7 +117,7 @@ static int esp_descbc_ivlen(const struct esp_algorithm *,
     struct secasvar *);
 static int esp_des_schedule(const struct esp_algorithm *,
     struct secasvar *);
-static int esp_des_schedlen(const struct esp_algorithm *);
+static size_t esp_des_schedlen(const struct esp_algorithm *);
 static int esp_des_blockdecrypt(const struct esp_algorithm *,
     struct secasvar *, u_int8_t *, u_int8_t *);
 static int esp_des_blockencrypt(const struct esp_algorithm *,
@@ -133,7 +125,7 @@ static int esp_des_blockencrypt(const struct esp_algorithm *,
 static int esp_cbc_mature(struct secasvar *);
 static int esp_3des_schedule(const struct esp_algorithm *,
     struct secasvar *);
-static int esp_3des_schedlen(const struct esp_algorithm *);
+static size_t esp_3des_schedlen(const struct esp_algorithm *);
 static int esp_3des_blockdecrypt(const struct esp_algorithm *,
     struct secasvar *, u_int8_t *, u_int8_t *);
 static int esp_3des_blockencrypt(const struct esp_algorithm *,
@@ -236,7 +228,7 @@ static const struct esp_algorithm aes_gcm = {
 	.keymax = ESP_AESGCM_KEYLEN256,
 	.schedlen = esp_gcm_schedlen,
 	.name = "aes-gcm",
-	.ivlen = esp_common_ivlen,
+	.ivlen = esp_gcm_ivlen,
 	.decrypt = esp_gcm_decrypt_aes,
 	.encrypt = esp_gcm_encrypt_aes,
 	.schedule = esp_gcm_schedule,
@@ -266,6 +258,10 @@ static const struct esp_algorithm chacha_poly = {
 	.finalizeencrypt = esp_chachapoly_encrypt_finalize
 };
 
+/*
+ * If any algorithm requires more than 2048 bits (256 bytes) of key material,
+ * update IPSEC_KEY_ENCRYPT_MAX_BYTES in ipsec.h
+ */
 static const struct esp_algorithm *esp_algorithms[] = {
 	&des_cbc,
 	&des3_cbc,
@@ -359,7 +355,7 @@ esp_schedule(const struct esp_algorithm *algo, struct secasvar *sav)
 	}
 
 //#### that malloc should be replaced by a saved buffer...
-	sav->sched = _MALLOC(sav->schedlen, M_SECA, M_DONTWAIT);
+	sav->sched = kalloc_data(sav->schedlen, Z_NOWAIT);
 	if (!sav->sched) {
 		sav->schedlen = 0;
 		lck_mtx_unlock(sadb_mutex);
@@ -371,7 +367,7 @@ esp_schedule(const struct esp_algorithm *algo, struct secasvar *sav)
 		ipseclog((LOG_ERR, "esp_schedule %s: error %d\n",
 		    algo->name, error));
 		bzero(sav->sched, sav->schedlen);
-		FREE(sav->sched, M_SECA);
+		kfree_data(sav->sched, sav->schedlen);
 		sav->sched = NULL;
 		sav->schedlen = 0;
 	}
@@ -468,7 +464,7 @@ esp_descbc_ivlen(
 	return 8;
 }
 
-static int
+static size_t
 esp_des_schedlen(
 	__unused const struct esp_algorithm *algo)
 {
@@ -593,11 +589,6 @@ esp_gcm_mature(struct secasvar *sav)
 		    "esp_gcm_mature: algorithm incompatible with derived\n"));
 		return 1;
 	}
-	if (sav->flags & SADB_X_EXT_IIV) {
-		ipseclog((LOG_ERR,
-		    "esp_gcm_mature: implicit IV not currently implemented\n"));
-		return 1;
-	}
 
 	if (!sav->key_enc) {
 		ipseclog((LOG_ERR, "esp_gcm_mature: no key is given.\n"));
@@ -637,7 +628,7 @@ esp_gcm_mature(struct secasvar *sav)
 	return 0;
 }
 
-static int
+static size_t
 esp_3des_schedlen(
 	__unused const struct esp_algorithm *algo)
 {
@@ -756,8 +747,9 @@ esp_cbc_decrypt(struct mbuf *m, size_t off, struct secasvar *sav,
 		}
 	}
 
+	VERIFY(ivoff <= INT_MAX);
 	/* grab iv */
-	m_copydata(m, ivoff, ivlen, (caddr_t) iv);
+	m_copydata(m, (int)ivoff, ivlen, (caddr_t) iv);
 
 	/* extend iv */
 	if (ivlen == blocklen) {
@@ -798,7 +790,7 @@ esp_cbc_decrypt(struct mbuf *m, size_t off, struct secasvar *sav,
 	/* skip bodyoff */
 	while (soff < bodyoff) {
 		if (soff + s->m_len > bodyoff) {
-			sn = bodyoff - soff;
+			sn = (int)(bodyoff - soff);
 			break;
 		}
 
@@ -814,7 +806,7 @@ esp_cbc_decrypt(struct mbuf *m, size_t off, struct secasvar *sav,
 	}
 
 	// Allocate blocksized buffer for unaligned or non-contiguous access
-	sbuf = (u_int8_t *)_MALLOC(blocklen, M_SECA, M_DONTWAIT);
+	sbuf = (u_int8_t *)kalloc_data(blocklen, Z_NOWAIT);
 	if (sbuf == NULL) {
 		return ENOBUFS;
 	}
@@ -864,7 +856,7 @@ esp_cbc_decrypt(struct mbuf *m, size_t off, struct secasvar *sav,
 			}
 
 			d->m_len = 0;
-			d->m_len = (M_TRAILINGSPACE(d) / blocklen) * blocklen;
+			d->m_len = (int)((M_TRAILINGSPACE(d) / blocklen) * blocklen);
 			if (d->m_len > i) {
 				d->m_len = i;
 			}
@@ -923,7 +915,7 @@ esp_cbc_decrypt(struct mbuf *m, size_t off, struct secasvar *sav,
 	bzero(sbuf, blocklen);
 end:
 	if (sbuf != NULL) {
-		FREE(sbuf, M_SECA);
+		kfree_data(sbuf, blocklen);
 	}
 	return result;
 }
@@ -993,13 +985,15 @@ esp_cbc_encrypt(
 		}
 	}
 
+	VERIFY(ivoff <= INT_MAX);
+
 	/* put iv into the packet.  if we are in derived mode, use seqno. */
 	if (derived) {
-		m_copydata(m, ivoff, ivlen, (caddr_t) iv);
+		m_copydata(m, (int)ivoff, ivlen, (caddr_t) iv);
 	} else {
 		bcopy(sav->iv, iv, ivlen);
 		/* maybe it is better to overwrite dest, not source */
-		m_copyback(m, ivoff, ivlen, (caddr_t) iv);
+		m_copyback(m, (int)ivoff, ivlen, (caddr_t) iv);
 	}
 
 	/* extend iv */
@@ -1041,7 +1035,7 @@ esp_cbc_encrypt(
 	/* skip bodyoff */
 	while (soff < bodyoff) {
 		if (soff + s->m_len > bodyoff) {
-			sn = bodyoff - soff;
+			sn = (int)(bodyoff - soff);
 			break;
 		}
 
@@ -1057,7 +1051,7 @@ esp_cbc_encrypt(
 	}
 
 	// Allocate blocksized buffer for unaligned or non-contiguous access
-	sbuf = (u_int8_t *)_MALLOC(blocklen, M_SECA, M_DONTWAIT);
+	sbuf = (u_int8_t *)kalloc_data(blocklen, Z_NOWAIT);
 	if (sbuf == NULL) {
 		return ENOBUFS;
 	}
@@ -1107,7 +1101,7 @@ esp_cbc_encrypt(
 			}
 
 			d->m_len = 0;
-			d->m_len = (M_TRAILINGSPACE(d) / blocklen) * blocklen;
+			d->m_len = (int)((M_TRAILINGSPACE(d) / blocklen) * blocklen);
 			if (d->m_len > i) {
 				d->m_len = i;
 			}
@@ -1163,7 +1157,7 @@ esp_cbc_encrypt(
 	key_sa_stir_iv(sav);
 end:
 	if (sbuf != NULL) {
-		FREE(sbuf, M_SECA);
+		kfree_data(sbuf, blocklen);
 	}
 	return result;
 }

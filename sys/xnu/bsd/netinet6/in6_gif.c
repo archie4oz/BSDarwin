@@ -80,16 +80,12 @@
 #include <netinet/ip.h>
 #endif
 #include <netinet/ip_encap.h>
-#if INET6
 #include <netinet/ip6.h>
 #include <netinet6/ip6_var.h>
 #include <netinet6/in6_gif.h>
 #include <netinet6/in6_var.h>
-#endif
 #include <netinet/ip_ecn.h>
-#if INET6
 #include <netinet6/ip6_ecn.h>
-#endif
 
 #include <net/if_gif.h>
 
@@ -139,7 +135,6 @@ in6_gif_output(
 		break;
 	}
 #endif
-#if INET6
 	case AF_INET6:
 	{
 		proto = IPPROTO_IPV6;
@@ -153,7 +148,6 @@ in6_gif_output(
 		itos = (ntohl(ip6->ip6_flow) >> 20) & 0xff;
 		break;
 	}
-#endif
 	default:
 #if DEBUG
 		printf("in6_gif_output: warning: unknown family %d passed\n",
@@ -181,6 +175,8 @@ in6_gif_output(
 	ip6->ip6_nxt    = proto;
 	ip6->ip6_hlim   = ip6_gif_hlim;
 	ip6->ip6_src    = sin6_src->sin6_addr;
+	ip6_output_setsrcifscope(m, sin6_src->sin6_scope_id, NULL);
+	ip6_output_setdstifscope(m, sin6_dst->sin6_scope_id, NULL);
 	/* bidirectional configured tunnel mode */
 	if (!IN6_IS_ADDR_UNSPECIFIED(&sin6_dst->sin6_addr)) {
 		ip6->ip6_dst = sin6_dst->sin6_addr;
@@ -264,7 +260,6 @@ in6_gif_input(struct mbuf **mp, int *offp, int proto)
 	m_adj(m, *offp);
 
 	switch (proto) {
-#if INET
 	case IPPROTO_IPV4:
 	{
 		struct ip *ip;
@@ -295,8 +290,6 @@ in6_gif_input(struct mbuf **mp, int *offp, int proto)
 		}
 		break;
 	}
-#endif /* INET */
-#if INET6
 	case IPPROTO_IPV6:
 	{
 		af = AF_INET6;
@@ -314,7 +307,6 @@ in6_gif_input(struct mbuf **mp, int *offp, int proto)
 		}
 		break;
 	}
-#endif
 	default:
 		ip6stat.ip6s_nogif++;
 		m_freem(m);

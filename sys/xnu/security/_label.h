@@ -68,24 +68,19 @@
  * XXXMAC: This shouldn't be exported to userland, but is because of ucred.h
  * and various other messes.
  */
-#if CONFIG_EMBEDDED
+#if defined(XNU_TARGET_OS_OSX)
+#define MAC_MAX_SLOTS   7
+#else
 #if CONFIG_VNGUARD
 #define MAC_MAX_SLOTS   4
 #else
 #define MAC_MAX_SLOTS   3
 #endif
-#else
-#define MAC_MAX_SLOTS   7
 #endif
 
-#define MAC_FLAG_INITIALIZED    0x0000001       /* Is initialized for use. */
-
 struct label {
-	int     l_flags;
-	union {
-		void    *l_ptr;
-		long     l_long;
-	}       l_perpolicy[MAC_MAX_SLOTS];
+	struct label **l_owner;
+	void *l_perpolicy[MAC_MAX_SLOTS];
 };
 
 #endif /* !_SECURITY_LABEL_H_ */

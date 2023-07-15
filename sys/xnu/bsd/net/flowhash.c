@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2012 Apple Inc. All rights reserved.
+ * Copyright (c) 2011-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -48,6 +48,7 @@
 #include <sys/types.h>
 #include <machine/endian.h>
 #include <net/flowhash.h>
+#include <os/base.h>
 
 static inline u_int32_t getblock32(const u_int32_t *, int);
 static inline u_int64_t getblock64(const u_int64_t *, int);
@@ -209,10 +210,10 @@ net_flowhash_mh3_x86_32(const void *key, u_int32_t len, const u_int32_t seed)
 	switch (len & 3) {
 	case 3:
 		k1 ^= tail[2] << 16;
-	/* FALLTHRU */
+		OS_FALLTHROUGH;
 	case 2:
 		k1 ^= tail[1] << 8;
-	/* FALLTHRU */
+		OS_FALLTHROUGH;
 	case 1:
 		k1 ^= tail[0];
 		k1 *= MH3_X86_32_C1;
@@ -305,22 +306,22 @@ net_flowhash_mh3_x64_128(const void *key, u_int32_t len, const u_int32_t seed)
 	switch (len & 15) {
 	case 15:
 		k2 ^= ((u_int64_t)tail[14]) << 48;
-	/* FALLTHRU */
+		OS_FALLTHROUGH;
 	case 14:
 		k2 ^= ((u_int64_t)tail[13]) << 40;
-	/* FALLTHRU */
+		OS_FALLTHROUGH;
 	case 13:
 		k2 ^= ((u_int64_t)tail[12]) << 32;
-	/* FALLTHRU */
+		OS_FALLTHROUGH;
 	case 12:
 		k2 ^= ((u_int64_t)tail[11]) << 24;
-	/* FALLTHRU */
+		OS_FALLTHROUGH;
 	case 11:
 		k2 ^= ((u_int64_t)tail[10]) << 16;
-	/* FALLTHRU */
+		OS_FALLTHROUGH;
 	case 10:
 		k2 ^= ((u_int64_t)tail[9]) << 8;
-	/* FALLTHRU */
+		OS_FALLTHROUGH;
 	case 9:
 		k2 ^= ((u_int64_t)tail[8]) << 0;
 		k2 *= MH3_X64_128_C2;
@@ -333,28 +334,28 @@ net_flowhash_mh3_x64_128(const void *key, u_int32_t len, const u_int32_t seed)
 #endif /* !__x86_64__ && !__arm64__ */
 		k2 *= MH3_X64_128_C1;
 		h2 ^= k2;
-	/* FALLTHRU */
+		OS_FALLTHROUGH;
 	case 8:
 		k1 ^= ((u_int64_t)tail[7]) << 56;
-	/* FALLTHRU */
+		OS_FALLTHROUGH;
 	case 7:
 		k1 ^= ((u_int64_t)tail[6]) << 48;
-	/* FALLTHRU */
+		OS_FALLTHROUGH;
 	case 6:
 		k1 ^= ((u_int64_t)tail[5]) << 40;
-	/* FALLTHRU */
+		OS_FALLTHROUGH;
 	case 5:
 		k1 ^= ((u_int64_t)tail[4]) << 32;
-	/* FALLTHRU */
+		OS_FALLTHROUGH;
 	case 4:
 		k1 ^= ((u_int64_t)tail[3]) << 24;
-	/* FALLTHRU */
+		OS_FALLTHROUGH;
 	case 3:
 		k1 ^= ((u_int64_t)tail[2]) << 16;
-	/* FALLTHRU */
+		OS_FALLTHROUGH;
 	case 2:
 		k1 ^= ((u_int64_t)tail[1]) << 8;
-	/* FALLTHRU */
+		OS_FALLTHROUGH;
 	case 1:
 		k1 ^= ((u_int64_t)tail[0]) << 0;
 		k1 *= MH3_X64_128_C1;
@@ -544,37 +545,37 @@ net_flowhash_jhash(const void *key, u_int32_t len, const u_int32_t seed)
 	switch (len) {
 	case 12:
 		c += k[11];
-	/* FALLTHRU */
+		OS_FALLTHROUGH;
 	case 11:
 		c += ((u_int32_t)k[10]) << 8;
-	/* FALLTHRU */
+		OS_FALLTHROUGH;
 	case 10:
 		c += ((u_int32_t)k[9]) << 16;
-	/* FALLTHRU */
+		OS_FALLTHROUGH;
 	case 9:
 		c += ((u_int32_t)k[8]) << 24;
-	/* FALLTHRU */
+		OS_FALLTHROUGH;
 	case 8:
 		b += k[7];
-	/* FALLTHRU */
+		OS_FALLTHROUGH;
 	case 7:
 		b += ((u_int32_t)k[6]) << 8;
-	/* FALLTHRU */
+		OS_FALLTHROUGH;
 	case 6:
 		b += ((u_int32_t)k[5]) << 16;
-	/* FALLTHRU */
+		OS_FALLTHROUGH;
 	case 5:
 		b += ((u_int32_t)k[4]) << 24;
-	/* FALLTHRU */
+		OS_FALLTHROUGH;
 	case 4:
 		a += k[3];
-	/* FALLTHRU */
+		OS_FALLTHROUGH;
 	case 3:
 		a += ((u_int32_t)k[2]) << 8;
-	/* FALLTHRU */
+		OS_FALLTHROUGH;
 	case 2:
 		a += ((u_int32_t)k[1]) << 16;
-	/* FALLTHRU */
+		OS_FALLTHROUGH;
 	case 1:
 		a += ((u_int32_t)k[0]) << 24;
 		break;
@@ -612,6 +613,8 @@ net_flowhash_jhash(const void *key, u_int32_t len, const u_int32_t seed)
 #endif /* !defined(__i386__) && !defined(__x86_64__) */
 		/* read 32-bit chunks */
 		const u_int32_t *k = (const u_int32_t *)key;
+		const u_int16_t *k16 = (const u_int16_t *)key;
+		const u_int8_t *k8 = (const u_int8_t *)key;
 
 		/*
 		 * all but last block:
@@ -626,16 +629,7 @@ net_flowhash_jhash(const void *key, u_int32_t len, const u_int32_t seed)
 			k += 3;
 		}
 
-		/*
-		 * handle the last (probably partial) block
-		 *
-		 * "k[2] & 0xffffff" actually reads beyond the end of the
-		 * string, but then masks off the part it's not allowed
-		 * to read.  Because the string is aligned, the masked-off
-		 * tail is in the same word as the rest of the string.
-		 * The masking trick does make the hash noticably faster
-		 * for short strings (like English words).
-		 */
+		/* handle the last (probably partial) block */
 		switch (len) {
 		case 12:
 			c += k[2];
@@ -644,19 +638,20 @@ net_flowhash_jhash(const void *key, u_int32_t len, const u_int32_t seed)
 			break;
 
 		case 11:
-			c += k[2] & 0xffffff;
+			c += ((u_int32_t)k8[10]) << 16;
+			c += k16[4];
 			b += k[1];
 			a += k[0];
 			break;
 
 		case 10:
-			c += k[2] & 0xffff;
+			c += k16[4];
 			b += k[1];
 			a += k[0];
 			break;
 
 		case 9:
-			c += k[2] & 0xff;
+			c += k8[8];
 			b += k[1];
 			a += k[0];
 			break;
@@ -667,17 +662,18 @@ net_flowhash_jhash(const void *key, u_int32_t len, const u_int32_t seed)
 			break;
 
 		case 7:
-			b += k[1] & 0xffffff;
+			b += ((u_int32_t)k8[6]) << 16;
+			b += k16[2];
 			a += k[0];
 			break;
 
 		case 6:
-			b += k[1] & 0xffff;
+			b += k16[2];
 			a += k[0];
 			break;
 
 		case 5:
-			b += k[1] & 0xff;
+			b += k8[4];
 			a += k[0];
 			break;
 
@@ -686,15 +682,16 @@ net_flowhash_jhash(const void *key, u_int32_t len, const u_int32_t seed)
 			break;
 
 		case 3:
-			a += k[0] & 0xffffff;
+			a += ((u_int32_t)k8[2]) << 16;
+			a += k16[0];
 			break;
 
 		case 2:
-			a += k[0] & 0xffff;
+			a += k16[0];
 			break;
 
 		case 1:
-			a += k[0] & 0xff;
+			a += k8[0];
 			break;
 
 		case 0:
@@ -734,7 +731,7 @@ net_flowhash_jhash(const void *key, u_int32_t len, const u_int32_t seed)
 
 	case 11:
 		c += ((u_int32_t)k8[10]) << 16;
-	/* FALLTHRU */
+		OS_FALLTHROUGH;
 	case 10:
 		c += k[4];
 		b += k[2] + (((u_int32_t)k[3]) << 16);
@@ -743,7 +740,7 @@ net_flowhash_jhash(const void *key, u_int32_t len, const u_int32_t seed)
 
 	case 9:
 		c += k8[8];
-	/* FALLTHRU */
+		OS_FALLTHROUGH;
 	case 8:
 		b += k[2] + (((u_int32_t)k[3]) << 16);
 		a += k[0] + (((u_int32_t)k[1]) << 16);
@@ -751,7 +748,7 @@ net_flowhash_jhash(const void *key, u_int32_t len, const u_int32_t seed)
 
 	case 7:
 		b += ((u_int32_t)k8[6]) << 16;
-	/* FALLTHRU */
+		OS_FALLTHROUGH;
 	case 6:
 		b += k[2];
 		a += k[0] + (((u_int32_t)k[1]) << 16);
@@ -759,14 +756,14 @@ net_flowhash_jhash(const void *key, u_int32_t len, const u_int32_t seed)
 
 	case 5:
 		b += k8[4];
-	/* FALLTHRU */
+		OS_FALLTHROUGH;
 	case 4:
 		a += k[0] + (((u_int32_t)k[1]) << 16);
 		break;
 
 	case 3:
 		a += ((u_int32_t)k8[2]) << 16;
-	/* FALLTHRU */
+		OS_FALLTHROUGH;
 	case 2:
 		a += k[0];
 		break;
@@ -812,37 +809,37 @@ while (len > 12) {
 switch (len) {
 case 12:
 	c += ((u_int32_t)k[11]) << 24;
-/* FALLTHRU */
+	OS_FALLTHROUGH;
 case 11:
 	c += ((u_int32_t)k[10]) << 16;
-/* FALLTHRU */
+	OS_FALLTHROUGH;
 case 10:
 	c += ((u_int32_t)k[9]) << 8;
-/* FALLTHRU */
+	OS_FALLTHROUGH;
 case 9:
 	c += k[8];
-/* FALLTHRU */
+	OS_FALLTHROUGH;
 case 8:
 	b += ((u_int32_t)k[7]) << 24;
-/* FALLTHRU */
+	OS_FALLTHROUGH;
 case 7:
 	b += ((u_int32_t)k[6]) << 16;
-/* FALLTHRU */
+	OS_FALLTHROUGH;
 case 6:
 	b += ((u_int32_t)k[5]) << 8;
-/* FALLTHRU */
+	OS_FALLTHROUGH;
 case 5:
 	b += k[4];
-/* FALLTHRU */
+	OS_FALLTHROUGH;
 case 4:
 	a += ((u_int32_t)k[3]) << 24;
-/* FALLTHRU */
+	OS_FALLTHROUGH;
 case 3:
 	a += ((u_int32_t)k[2]) << 16;
-/* FALLTHRU */
+	OS_FALLTHROUGH;
 case 2:
 	a += ((u_int32_t)k[1]) << 8;
-/* FALLTHRU */
+	OS_FALLTHROUGH;
 case 1:
 	a += k[0];
 	break;

@@ -188,6 +188,8 @@ extern int tcptv_persmin_val;
 #define TCPTV_REXMTMAX  ( 64*TCP_RETRANSHZ )    /* max REXMT value */
 #define TCPTV_REXMTMIN  ( TCP_RETRANSHZ/33 )    /* min REXMT for non-local connections */
 
+#define TCPTV_FINWAIT2  ( 60*TCP_RETRANSHZ)     /* timeout to get out of FIN_WAIT_2 */
+
 /*
  * Window for counting received bytes to see if ack-stretching
  * can start (default 100 ms)
@@ -205,8 +207,6 @@ extern int tcptv_persmin_val;
  */
 #define TCP_RCV_SS_PKTCOUNT     512
 
-/* Receiver idle time, for rcv socket buffer resizing */
-#define TCPTV_RCVBUFIDLE (TCP_RETRANSHZ/2)
 #define TCPTV_TWTRUNC   8               /* RTO factor to truncate TW */
 
 #define TCP_LINGERTIME  120             /* linger at most 2 minutes */
@@ -245,10 +245,8 @@ LIST_HEAD(timerlisthead, tcptimerentry);
 
 struct tcptimerlist {
 	struct timerlisthead lhead;     /* head of the list */
-	lck_mtx_t *mtx;         /* lock to protect the list */
-	lck_attr_t *mtx_attr;   /* mutex attributes */
+	lck_mtx_t mtx;          /* lock to protect the list */
 	lck_grp_t *mtx_grp;     /* mutex group definition */
-	lck_grp_attr_t *mtx_grp_attr;   /* mutex group attributes */
 	thread_call_t call;     /* call entry */
 	uint32_t runtime;       /* time at which this list is going to run */
 	uint32_t schedtime;     /* time at which this list was scheduled */
@@ -303,13 +301,13 @@ struct tcptimerlist {
 #define TCP_CONN_KEEPIDLE(tp) \
 	((tp)->t_keepidle && \
 	((tp)->t_inpcb->inp_socket->so_options & SO_KEEPALIVE) ? \
-	        (tp)->t_keepidle : tcp_keepidle)
+	        (tp)->t_keepidle : (uint32_t)tcp_keepidle)
 #define TCP_CONN_KEEPINIT(tp) \
-	(((tp)->t_keepinit > 0) ? (tp)->t_keepinit : tcp_keepinit)
+	(((tp)->t_keepinit > 0) ? (tp)->t_keepinit : (uint32_t)tcp_keepinit)
 #define TCP_CONN_KEEPCNT(tp) \
-	(((tp)->t_keepcnt > 0) ? (tp)->t_keepcnt : tcp_keepcnt)
+	(((tp)->t_keepcnt > 0) ? (tp)->t_keepcnt : (uint32_t)tcp_keepcnt)
 #define TCP_CONN_KEEPINTVL(tp) \
-	(((tp)->t_keepintvl > 0) ? (tp)->t_keepintvl : tcp_keepintvl)
+	(((tp)->t_keepintvl > 0) ? (tp)->t_keepintvl : (uint32_t)tcp_keepintvl)
 #define TCP_CONN_MAXIDLE(tp) \
 	(TCP_CONN_KEEPCNT(tp) * TCP_CONN_KEEPINTVL(tp))
 

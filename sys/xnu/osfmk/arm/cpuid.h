@@ -39,6 +39,7 @@
 #include <stdint.h>
 #include <mach/boolean.h>
 #include <machine/machine_cpuid.h>
+#include <machine/machine_routines.h>
 
 typedef struct {
 	uint32_t arm_rev : 4,  /* 00:03 revision number */
@@ -109,12 +110,6 @@ typedef union {
 /* H4 (ARMv7 architecture) */
 #define CPU_PART_CORTEXA9           0xC09
 
-/* H5 (SWIFT architecture) */
-#define CPU_PART_SWIFT              0x0
-
-/* H6 (ARMv8 architecture) */
-#define CPU_PART_CYCLONE            0x1
-
 /* H7 (ARMv8 architecture) */
 #define CPU_PART_TYPHOON            0x2
 
@@ -154,14 +149,50 @@ typedef union {
 /* H11G e-Core (ARMv8 architecture) */
 #define CPU_PART_TEMPEST_ARUBA      0x11
 
-#ifndef RC_HIDE_XNU_LIGHTNING
 /* H12 p-Core (ARMv8 architecture) */
 #define CPU_PART_LIGHTNING          0x12
 
 /* H12 e-Core (ARMv8 architecture) */
 #define CPU_PART_THUNDER            0x13
 
-#endif /* !RC_HIDE_XNU_LIGHTNING */
+#ifndef RC_HIDE_XNU_FIRESTORM
+/*
+ * Whilst this is a Thunder-based SoC, it
+ * hasn't been released and should remain
+ * hidden in 2020 seeds.
+ */
+/* M10 e-Core (ARMv8 architecture) */
+#define CPU_PART_THUNDER_M10        0x26
+#endif
+
+#ifndef RC_HIDE_XNU_FIRESTORM
+
+/* H13 e-Core */
+#define CPU_PART_ICESTORM           0x20
+
+/* H13 p-Core */
+#define CPU_PART_FIRESTORM          0x21
+
+/* H13G e-Core */
+#define CPU_PART_ICESTORM_TONGA     0x22
+
+/* H13G p-Core */
+#define CPU_PART_FIRESTORM_TONGA    0x23
+
+#endif /* !RC_HIDE_XNU_FIRESTORM */
+
+/* H13J e-Core */
+#define CPU_PART_ICESTORM_JADE_CHOP    0x24
+#define CPU_PART_ICESTORM_JADE_DIE     0x28
+
+/* H13J p-Core */
+#define CPU_PART_FIRESTORM_JADE_CHOP   0x25
+#define CPU_PART_FIRESTORM_JADE_DIE    0x29
+
+
+
+
+
 
 /* Cache type identification */
 
@@ -175,6 +206,7 @@ typedef enum {
 } cache_type_t;
 
 typedef struct {
+	boolean_t    c_valid;            /* has this cache info been populated? */
 	boolean_t    c_unified;          /* unified I & D cache? */
 	uint32_t     c_isize;            /* in Bytes (ARM caches can be 0.5 KB) */
 	boolean_t    c_i_ppage;          /* protected page restriction for I cache
@@ -236,12 +268,14 @@ extern "C" {
 extern void do_cpuid(void);
 extern arm_cpu_info_t *cpuid_info(void);
 extern int cpuid_get_cpufamily(void);
+extern int cpuid_get_cpusubfamily(void);
 
 extern void do_debugid(void);
 extern arm_debug_info_t *arm_debug_info(void);
 
 extern void do_cacheid(void);
 extern cache_info_t *cache_info(void);
+extern cache_info_t *cache_info_type(cluster_type_t cluster_type);
 
 extern void do_mvfpid(void);
 extern arm_mvfp_info_t *arm_mvfp_info(void);

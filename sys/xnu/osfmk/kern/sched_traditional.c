@@ -143,6 +143,7 @@ const struct sched_dispatch_table sched_traditional_dispatch = {
 	.steal_thread_enabled                           = sched_traditional_steal_thread_enabled,
 	.steal_thread                                   = sched_traditional_steal_thread,
 	.compute_timeshare_priority                     = sched_compute_timeshare_priority,
+	.choose_node                                    = sched_choose_node,
 	.choose_processor                               = choose_processor,
 	.processor_enqueue                              = sched_traditional_processor_enqueue,
 	.processor_queue_shutdown                       = sched_traditional_processor_queue_shutdown,
@@ -167,11 +168,12 @@ const struct sched_dispatch_table sched_traditional_dispatch = {
 	.thread_avoid_processor                         = NULL,
 	.processor_balance                              = sched_SMT_balance,
 
-	.rt_runq                                        = sched_rtglobal_runq,
-	.rt_init                                        = sched_rtglobal_init,
-	.rt_queue_shutdown                              = sched_rtglobal_queue_shutdown,
-	.rt_runq_scan                                   = sched_rtglobal_runq_scan,
-	.rt_runq_count_sum                              = sched_rtglobal_runq_count_sum,
+	.rt_runq                                        = sched_rtlocal_runq,
+	.rt_init                                        = sched_rtlocal_init,
+	.rt_queue_shutdown                              = sched_rtlocal_queue_shutdown,
+	.rt_runq_scan                                   = sched_rtlocal_runq_scan,
+	.rt_runq_count_sum                              = sched_rtlocal_runq_count_sum,
+	.rt_steal_thread                                = sched_rtlocal_steal_thread,
 
 	.qos_max_parallelism                            = sched_qos_max_parallelism,
 	.check_spill                                    = sched_check_spill,
@@ -181,6 +183,8 @@ const struct sched_dispatch_table sched_traditional_dispatch = {
 	.run_count_decr                                 = sched_run_decr,
 	.update_thread_bucket                           = sched_update_thread_bucket,
 	.pset_made_schedulable                          = sched_pset_made_schedulable,
+	.cpu_init_completed                             = NULL,
+	.thread_eligible_for_pset                       = NULL,
 };
 
 const struct sched_dispatch_table sched_traditional_with_pset_runqueue_dispatch = {
@@ -194,6 +198,7 @@ const struct sched_dispatch_table sched_traditional_with_pset_runqueue_dispatch 
 	.steal_thread_enabled                           = sched_steal_thread_enabled,
 	.steal_thread                                   = sched_traditional_steal_thread,
 	.compute_timeshare_priority                     = sched_compute_timeshare_priority,
+	.choose_node                                    = sched_choose_node,
 	.choose_processor                               = choose_processor,
 	.processor_enqueue                              = sched_traditional_processor_enqueue,
 	.processor_queue_shutdown                       = sched_traditional_processor_queue_shutdown,
@@ -218,11 +223,12 @@ const struct sched_dispatch_table sched_traditional_with_pset_runqueue_dispatch 
 	.thread_avoid_processor                         = NULL,
 	.processor_balance                              = sched_SMT_balance,
 
-	.rt_runq                                        = sched_rtglobal_runq,
-	.rt_init                                        = sched_rtglobal_init,
-	.rt_queue_shutdown                              = sched_rtglobal_queue_shutdown,
-	.rt_runq_scan                                   = sched_rtglobal_runq_scan,
-	.rt_runq_count_sum                              = sched_rtglobal_runq_count_sum,
+	.rt_runq                                        = sched_rtlocal_runq,
+	.rt_init                                        = sched_rtlocal_init,
+	.rt_queue_shutdown                              = sched_rtlocal_queue_shutdown,
+	.rt_runq_scan                                   = sched_rtlocal_runq_scan,
+	.rt_runq_count_sum                              = sched_rtlocal_runq_count_sum,
+	.rt_steal_thread                                = sched_rtlocal_steal_thread,
 
 	.qos_max_parallelism                            = sched_qos_max_parallelism,
 	.check_spill                                    = sched_check_spill,
@@ -232,6 +238,8 @@ const struct sched_dispatch_table sched_traditional_with_pset_runqueue_dispatch 
 	.run_count_decr                                 = sched_run_decr,
 	.update_thread_bucket                           = sched_update_thread_bucket,
 	.pset_made_schedulable                          = sched_pset_made_schedulable,
+	.cpu_init_completed                             = NULL,
+	.thread_eligible_for_pset                       = NULL,
 };
 
 static void

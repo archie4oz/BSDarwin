@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -223,8 +223,8 @@
 #define SIOCSETOT     _IOW('s', 128, int)             /* deprecated */
 #endif /* PRIVATE */
 
-#define SIOCGIFMAC      _IOWR('i', 130, struct ifreq)   /* get IF MAC label */
-#define SIOCSIFMAC      _IOW('i', 131, struct ifreq)    /* set IF MAC label */
+#define SIOCGIFMAC      _IOWR('i', 130, struct ifreq)   /* deprecated */
+#define SIOCSIFMAC      _IOW('i', 131, struct ifreq)    /* deprecated */
 #define SIOCSIFKPI      _IOW('i', 134, struct ifreq) /* set interface kext param - root only */
 #define SIOCGIFKPI      _IOWR('i', 135, struct ifreq) /* get interface kext param */
 
@@ -297,6 +297,7 @@
 #define SIOCSECNMODE            _IOW('i', 177, struct ifreq)
 
 #define SIOCSIFORDER    _IOWR('i', 178, struct if_order)
+#define SIOCGIFORDER    _IOWR('i', 179, struct if_order)
 
 #define SIOCSQOSMARKINGMODE     _IOWR('i', 180, struct ifreq)
 #define SIOCSFASTLANECAPABLE    SIOCSQOSMARKINGMODE
@@ -324,10 +325,8 @@
 #define SIOCSIFLOWINTERNET      _IOWR('i', 191, struct ifreq)
 #define SIOCGIFLOWINTERNET      _IOWR('i', 192, struct ifreq)
 
-#if INET6
 #define SIOCGIFNAT64PREFIX      _IOWR('i', 193, struct if_nat64req)
 #define SIOCSIFNAT64PREFIX      _IOWR('i', 194, struct if_nat64req)
-#endif
 #define SIOCGIFNEXUS            _IOWR('i', 195, struct if_nexusreq)
 #define SIOCGIFPROTOLIST        _IOWR('i', 196, struct if_protolistreq) /* get list of attached protocols */
 #ifdef BSD_KERNEL_PRIVATE
@@ -344,9 +343,7 @@
 #define SIOCGIFLOWPOWER _IOWR('i', 199, struct ifreq)   /* Low Power Mode */
 #define SIOCSIFLOWPOWER _IOWR('i', 200, struct ifreq)   /* Low Power Mode */
 
-#if INET6
 #define SIOCGIFCLAT46ADDR       _IOWR('i', 201, struct if_clat46req)
-#endif /* INET6 */
 
 #define SIOCGIFMPKLOG _IOWR('i', 202, struct ifreq)     /* Multi-layer Packet Logging */
 #define SIOCSIFMPKLOG _IOWR('i', 203, struct ifreq)     /* Multi-layer Packet Logging */
@@ -358,6 +355,19 @@
 
 #define SIOCGIFNOACKPRIO _IOWR('i', 207, struct ifreq) /* get interface no ack prioritization flag */
 #define SIOCSIFNOACKPRIO _IOWR('i', 208, struct ifreq) /* mark interface no ack prioritization flagd */
+#define SIOCGETROUTERMODE _IOWR('i', 209, struct ifreq)   /* get IPv4 router mode state */
+
+#define SIOCSIFNETWORKID _IOWR('i', 210, struct if_netidreq)   /* set Network Identifier for a given interface */
+
+#define SIOCSIFMARKWAKEPKT _IOWR('i', 211, struct ifreq) /* to mark the next input packet with wake flag */
+
+#define SIOCSIFESTTHROUGHPUT _IOWR('i', 212, struct ifreq) /* set ifru_estimated_throughput */
+#define SIOCSIFRADIODETAILS _IOWR('i', 213, struct ifreq) /* set ifru_radio_details */
+
+#define SIOCSIFLINKQUALITYMETRIC _IOWR('i', 214, struct ifreq) /* set LQM */
+
+#define SIOCSIFNOTRAFFICSHAPING _IOWR('i', 215, struct ifreq) /* skip dummynet and netem traffic shaping */
+#define SIOCGIFNOTRAFFICSHAPING _IOWR('i', 216, struct ifreq) /* skip dummynet and netem traffic shaping */
 #endif /* PRIVATE */
 
 #endif /* !_SYS_SOCKIO_H_ */

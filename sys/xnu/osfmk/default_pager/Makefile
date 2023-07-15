@@ -23,7 +23,11 @@ DATAFILES = \
 
 INSTALL_MI_LIST	= ${DATAFILES}
 
+INSTALL_SF_MI_LCL_LIST = ${DATAFILES}
+
 INSTALL_MI_GEN_LIST = ${MIGINCLUDES}
+
+INSTALL_SF_MI_LCL_GEN_LIST = ${MIGINCLUDES}
 
 INSTALL_MI_DIR = default_pager
 
@@ -39,7 +43,7 @@ ${MIGINCLUDES} : ${MIG_TYPES}
 
 ${MIG_UUHDRS} : \
 	%.h : %.defs
-	$(call makelog,$(ColorM)MIG$(Color0) $(ColorF)$@$(Color0))
+	@$(LOG_MIG) $@
 	$(_v)$(MIG) $(MIGFLAGS)		\
 		-server /dev/null	\
 		-user /dev/null		\
@@ -48,7 +52,7 @@ ${MIG_UUHDRS} : \
 
 ${MIG_USHDRS} : \
 	%_server.h : %.defs
-	$(call makelog,$(ColorM)MIG$(Color0) $(ColorF)$@$(Color0))
+	@$(LOG_MIG) $@
 	$(_v)$(MIG) $(MIGFLAGS)		\
 		-server /dev/null	\
 		-user /dev/null		\
@@ -99,7 +103,7 @@ ${COMP_FILES} : ${MIG_TYPES}
 
 ${MIG_KUSRC} : \
 	%_user.c : %.defs
-	$(call makelog,$(ColorM)MIG$(Color0) $(ColorF)$@$(Color0))
+	@$(LOG_MIG) $@
 	$(_v)${MIG} ${MIGFLAGS} ${MIGKUFLAGS}        \
 		-user    $*_user.c              \
 		-header  $*.h              \
@@ -109,7 +113,7 @@ ${MIG_KUSRC} : \
 
 ${MIG_KSSRC}: \
 	%_server.c : %.defs
-	$(call makelog,$(ColorM)MIG$(Color0) $(ColorF)$@$(Color0))
+	@$(LOG_MIG) $@
 	$(_v)${MIG} ${MIGFLAGS} ${MIGKSFLAGS}        \
 		-user    /dev/null              \
 		-header  /dev/null              \

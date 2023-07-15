@@ -108,6 +108,7 @@ extern memory_object_offset_t vm_compressor_pager_next_compressed(
 	memory_object_t         mem_obj,
 	memory_object_offset_t  offset);
 
+extern bool osenvironment_is_diagnostics(void);
 extern void vm_compressor_init(void);
 extern int vm_compressor_put(ppnum_t pn, int *slot, void **current_chead, char *scratch_buf);
 extern int vm_compressor_get(ppnum_t pn, int *slot, int flags);
@@ -126,6 +127,12 @@ extern kern_return_t vm_compressor_pager_relocate(memory_object_t mem_obj, memor
 extern kern_return_t vm_compressor_relocate(void **current_chead, int *src_slot_p);
 extern void vm_compressor_finished_filling(void **current_chead);
 #endif /* CONFIG_FREEZE */
+
+#if DEVELOPMENT || DEBUG
+extern kern_return_t vm_compressor_pager_inject_error(memory_object_t pager,
+    memory_object_offset_t offset);
+extern void vm_compressor_inject_error(int *slot);
+#endif /* DEVELOPMENT || DEBUG */
 
 #endif  /* _VM_VM_COMPRESSOR_PAGER_H_ */
 

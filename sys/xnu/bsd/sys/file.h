@@ -95,12 +95,11 @@ int file_drop(int);
 #endif /* KERNEL */
 
 #ifdef KERNEL_PRIVATE
-int fd_rdwr(int fd, enum uio_rw, uint64_t base, int64_t len, enum uio_seg,
-    off_t offset, int io_flg, int64_t *aresid);
 struct fileglob;
 struct fileproc;
 struct vnode;
 int fp_getfvp(struct proc *p, int fd, struct fileproc **resultfp, struct vnode  **resultvp);
+int fp_get_pipe_id(proc_t p, int fd, uint64_t *result_pipe_id);
 struct vnode *fg_get_vnode(struct fileglob *fg);
 #endif  /* KERNEL_PRIVATE */
 __END_DECLS

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2012-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -42,6 +42,10 @@ STUB(bpf_attach);
 STUB(bpf_tap_in);
 STUB(bpf_tap_out);
 STUB(bpfattach);
+#if !SKYWALK
+STUB(bpf_tap_packet_in);
+STUB(bpf_tap_packet_out);
+#endif /* SKYWALK */
 STUB(ctl_deregister);
 STUB(ctl_enqueuedata);
 STUB(ctl_enqueuembuf);
@@ -289,6 +293,7 @@ STUB(sock_receive);
 STUB(sock_receivembuf);
 STUB(sock_send);
 STUB(sock_sendmbuf);
+STUB(sock_sendmbuf_can_wait);
 STUB(sock_setpriv);
 STUB(sock_setsockopt);
 STUB(sock_shutdown);
@@ -300,6 +305,7 @@ STUB(sockopt_level);
 STUB(sockopt_name);
 STUB(sockopt_valsize);
 STUB(kev_post_msg);
+STUB(kev_post_msg_nowait);
 STUB(ctl_id_by_name);
 STUB(ctl_name_by_id);
 STUB(ifnet_allocate_extended);
@@ -326,6 +332,7 @@ STUB(ifnet_input_extended);
 STUB(ifnet_latencies);
 STUB(ifnet_link_quality);
 STUB(ifnet_notice_master_elected);
+STUB(ifnet_notice_primary_elected);
 STUB(ifnet_notice_node_absence);
 STUB(ifnet_notice_node_presence);
 STUB(ifnet_notice_node_presence_v2);
@@ -355,7 +362,6 @@ STUB(ifnet_get_buffer_status);
 STUB(ifnet_normalise_unsent_data);
 STUB(ifnet_set_low_power_mode);
 STUB(ifnet_notify_tcp_keepalive_offload_timeout);
-STUB(ifnet_interface_advisory_report);
 STUB(in6_localaddr);
 STUB(in_localaddr);
 STUB(in6addr_local);
@@ -462,6 +468,10 @@ STUB(ipf_addv6_internal);
 STUB(sflt_register_internal);
 STUB(sock_accept_internal);
 STUB(sock_socket_internal);
+STUB(vsock_add_transport);
+STUB(vsock_remove_transport);
+STUB(vsock_reset_transport);
+STUB(vsock_put_message);
 #undef STUB
 
 /*

@@ -29,6 +29,8 @@
 #ifndef _MACH_ARM_EXCEPTION_H_
 #define _MACH_ARM_EXCEPTION_H_
 
+#if defined (__arm__) || defined (__arm64__)
+
 #define EXC_TYPES_COUNT         14      /* incl. illegal exception 0 */
 
 #define EXC_MASK_MACHINE         0
@@ -72,6 +74,7 @@
 #define EXC_ARM_DA_DEBUG        0x102   /* Debug (watch/break) Fault */
 #define EXC_ARM_SP_ALIGN        0x103   /* SP Alignment Fault */
 #define EXC_ARM_SWP             0x104   /* SWP instruction */
+#define EXC_ARM_PAC_FAIL        0x105   /* PAC authentication failure */
 
 /*
  *	EXC_BREAKPOINT
@@ -79,5 +82,6 @@
 
 #define EXC_ARM_BREAKPOINT      1       /* breakpoint trap */
 
+#endif /* defined (__arm__) || defined (__arm64__) */
 
 #endif  /* _MACH_ARM_EXCEPTION_H_ */

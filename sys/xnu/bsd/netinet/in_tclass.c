@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009-2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2009-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -58,8 +58,11 @@
 #include <netinet/tcp.h>
 #include <netinet/tcp_var.h>
 #include <netinet/tcp_cc.h>
-#include <netinet/lro_ext.h>
 #include <netinet/in_tclass.h>
+
+#include <os/log.h>
+
+static_assert(_SO_TC_MAX == SO_TC_STATS_MAX);
 
 struct net_qos_dscp_map {
 	uint8_t        sotc_to_dscp[SO_TC_MAX];
@@ -75,11 +78,8 @@ static void set_dscp_to_wifi_ac_map(const struct dcsp_msc_map *, int);
 static errno_t dscp_msc_map_from_netsvctype_dscp_map(struct netsvctype_dscp_map *, size_t,
     struct dcsp_msc_map *);
 
-static lck_grp_attr_t *tclass_lck_grp_attr = NULL; /* mutex group attributes */
-static lck_grp_t *tclass_lck_grp = NULL;        /* mutex group definition */
-static lck_attr_t *tclass_lck_attr = NULL;      /* mutex attributes */
-decl_lck_mtx_data(static, tclass_lock_data);
-static lck_mtx_t *tclass_lock = &tclass_lock_data;
+static LCK_GRP_DECLARE(tclass_lck_grp, "tclass");
+static LCK_MTX_DECLARE(tclass_lock, &tclass_lck_grp);
 
 SYSCTL_NODE(_net, OID_AUTO, qos,
     CTLFLAG_RW | CTLFLAG_LOCKED, 0, "QoS");
@@ -131,7 +131,7 @@ SYSCTL_INT(_net_qos_policy, OID_AUTO, capable_enabled,
  */
 const int sotc_by_netservicetype[_NET_SERVICE_TYPE_COUNT] = {
 	SO_TC_BE,       /* NET_SERVICE_TYPE_BE */
-	SO_TC_BK_SYS,   /* NET_SERVICE_TYPE_BK */
+	SO_TC_BK,       /* NET_SERVICE_TYPE_BK */
 	SO_TC_VI,       /* NET_SERVICE_TYPE_SIG */
 	SO_TC_VI,       /* NET_SERVICE_TYPE_VI */
 	SO_TC_VO,       /* NET_SERVICE_TYPE_VO */
@@ -157,7 +157,6 @@ struct netsvctype_dscp_map fastlane_netsvctype_dscp_map[_NET_SERVICE_TYPE_COUNT]
 	{ .netsvctype = NET_SERVICE_TYPE_RD, .dscp = _DSCP_AF21 },
 };
 
-
 /*
  * DSCP mappings for QoS RFC4594 as based on network service types
  */
@@ -176,6 +175,9 @@ struct netsvctype_dscp_map rfc4594_netsvctype_dscp_map[_NET_SERVICE_TYPE_COUNT] 
 
 static struct net_qos_dscp_map fastlane_net_qos_dscp_map;
 static struct net_qos_dscp_map rfc4594_net_qos_dscp_map;
+#if (DEBUG || DEVELOPMENT)
+static struct net_qos_dscp_map custom_net_qos_dscp_map;
+#endif /* (DEBUG || DEVELOPMENT) */
 
 /*
  * The size is one more than the max because DSCP start at zero
@@ -342,14 +344,14 @@ set_tclass_for_curr_proc(struct socket *so)
 	pid_t pid = proc_pid(p);
 	char *pname = proc_best_name(p);
 
-	lck_mtx_lock(tclass_lock);
+	lck_mtx_lock(&tclass_lock);
 
 	TAILQ_FOREACH(tfp, &tfp_head, tfp_link) {
 		if ((tfp->tfp_pid == pid) || (tfp->tfp_pid == -1 &&
 		    strncmp(pname, tfp->tfp_pname,
 		    sizeof(tfp->tfp_pname)) == 0)) {
 			if (tfp->tfp_class != SO_TC_UNSPEC) {
-				so->so_traffic_class = tfp->tfp_class;
+				so->so_traffic_class = (uint16_t)tfp->tfp_class;
 			}
 
 			if (tfp->tfp_qos_mode == QOS_MODE_MARKING_POLICY_ENABLE) {
@@ -361,7 +363,7 @@ set_tclass_for_curr_proc(struct socket *so)
 		}
 	}
 
-	lck_mtx_unlock(tclass_lock);
+	lck_mtx_unlock(&tclass_lock);
 }
 
 /*
@@ -373,7 +375,7 @@ purge_tclass_for_proc(void)
 	int error = 0;
 	struct tclass_for_proc *tfp, *tvar;
 
-	lck_mtx_lock(tclass_lock);
+	lck_mtx_lock(&tclass_lock);
 
 	TAILQ_FOREACH_SAFE(tfp, &tfp_head, tfp_link, tvar) {
 		proc_t p;
@@ -385,13 +387,13 @@ purge_tclass_for_proc(void)
 			tfp_count--;
 			TAILQ_REMOVE(&tfp_head, tfp, tfp_link);
 
-			_FREE(tfp, M_TEMP);
+			kfree_type(struct tclass_for_proc, tfp);
 		} else {
 			proc_rele(p);
 		}
 	}
 
-	lck_mtx_unlock(tclass_lock);
+	lck_mtx_unlock(&tclass_lock);
 
 	return error;
 }
@@ -408,7 +410,7 @@ free_tclass_for_proc(struct tclass_for_proc *tfp)
 	}
 	tfp_count--;
 	TAILQ_REMOVE(&tfp_head, tfp, tfp_link);
-	_FREE(tfp, M_TEMP);
+	kfree_type(struct tclass_for_proc, tfp);
 }
 
 /*
@@ -420,13 +422,13 @@ flush_tclass_for_proc(void)
 	int error = 0;
 	struct tclass_for_proc *tfp, *tvar;
 
-	lck_mtx_lock(tclass_lock);
+	lck_mtx_lock(&tclass_lock);
 
 	TAILQ_FOREACH_SAFE(tfp, &tfp_head, tfp_link, tvar) {
 		free_tclass_for_proc(tfp);
 	}
 
-	lck_mtx_unlock(tclass_lock);
+	lck_mtx_unlock(&tclass_lock);
 
 	return error;
 }
@@ -443,7 +445,7 @@ alloc_tclass_for_proc(pid_t pid, const char *pname)
 		return NULL;
 	}
 
-	tfp = _MALLOC(sizeof(struct tclass_for_proc), M_TEMP, M_NOWAIT | M_ZERO);
+	tfp = kalloc_type(struct tclass_for_proc, Z_NOWAIT | Z_ZERO);
 	if (tfp == NULL) {
 		return NULL;
 	}
@@ -473,13 +475,11 @@ set_pid_tclass(struct so_tcdbg *so_tcdbg)
 {
 	int error = EINVAL;
 	proc_t p = NULL;
-	struct filedesc *fdp;
-	struct fileproc *fp;
 	struct tclass_for_proc *tfp;
-	int i;
 	pid_t pid = so_tcdbg->so_tcdbg_pid;
 	int tclass = so_tcdbg->so_tcdbg_tclass;
 	int netsvctype = so_tcdbg->so_tcdbg_netsvctype;
+	uint8_t ecn_val = so_tcdbg->so_tcdbg_ecn_val;
 
 	p = proc_find(pid);
 	if (p == NULL) {
@@ -488,13 +488,13 @@ set_pid_tclass(struct so_tcdbg *so_tcdbg)
 	}
 
 	/* Need a tfp */
-	lck_mtx_lock(tclass_lock);
+	lck_mtx_lock(&tclass_lock);
 
 	tfp = find_tfp_by_pid(pid);
 	if (tfp == NULL) {
 		tfp = alloc_tclass_for_proc(pid, NULL);
 		if (tfp == NULL) {
-			lck_mtx_unlock(tclass_lock);
+			lck_mtx_unlock(&tclass_lock);
 			error = ENOBUFS;
 			goto done;
 		}
@@ -502,23 +502,19 @@ set_pid_tclass(struct so_tcdbg *so_tcdbg)
 	tfp->tfp_class = tclass;
 	tfp->tfp_qos_mode = so_tcdbg->so_tcbbg_qos_mode;
 
-	lck_mtx_unlock(tclass_lock);
+	lck_mtx_unlock(&tclass_lock);
 
 	if (tfp != NULL) {
+		struct fileproc *fp;
 		proc_fdlock(p);
-
-		fdp = p->p_fd;
-		for (i = 0; i < fdp->fd_nfiles; i++) {
+		fdt_foreach(fp, p) {
 			struct socket *so;
 
-			fp = fdp->fd_ofiles[i];
-			if (fp == NULL ||
-			    (fdp->fd_ofileflags[i] & UF_RESERVED) != 0 ||
-			    FILEGLOB_DTYPE(fp->f_fglob) != DTYPE_SOCKET) {
+			if (FILEGLOB_DTYPE(fp->fp_glob) != DTYPE_SOCKET) {
 				continue;
 			}
 
-			so = (struct socket *)fp->f_fglob->fg_data;
+			so = (struct socket *)fp_get_data(fp);
 			if (SOCK_DOM(so) != PF_INET && SOCK_DOM(so) != PF_INET6) {
 				continue;
 			}
@@ -528,6 +524,18 @@ set_pid_tclass(struct so_tcdbg *so_tcdbg)
 				so->so_flags1 |= SOF1_QOSMARKING_ALLOWED;
 			} else if (tfp->tfp_qos_mode == QOS_MODE_MARKING_POLICY_DISABLE) {
 				so->so_flags1 &= ~SOF1_QOSMARKING_ALLOWED;
+			}
+
+			struct inpcb *inp = so ? sotoinpcb(so) : NULL;
+			struct tcpcb *tp = inp ? intotcpcb(inp) : NULL;
+
+			if (tp != NULL) {
+				if (ecn_val == IPTOS_ECN_ECT1 || ecn_val == IPTOS_ECN_ECT0) {
+					tp->ecn_flags |= (ecn_val == IPTOS_ECN_ECT1) ?
+					    TE_FORCE_ECT1 : TE_FORCE_ECT0;
+				} else {
+					tp->ecn_flags &= ~(TE_FORCE_ECT1 | TE_FORCE_ECT0);
+				}
 			}
 			socket_unlock(so, 1);
 
@@ -559,13 +567,13 @@ set_pname_tclass(struct so_tcdbg *so_tcdbg)
 	int error = EINVAL;
 	struct tclass_for_proc *tfp;
 
-	lck_mtx_lock(tclass_lock);
+	lck_mtx_lock(&tclass_lock);
 
 	tfp = find_tfp_by_pname(so_tcdbg->so_tcdbg_pname);
 	if (tfp == NULL) {
 		tfp = alloc_tclass_for_proc(-1, so_tcdbg->so_tcdbg_pname);
 		if (tfp == NULL) {
-			lck_mtx_unlock(tclass_lock);
+			lck_mtx_unlock(&tclass_lock);
 			error = ENOBUFS;
 			goto done;
 		}
@@ -573,7 +581,7 @@ set_pname_tclass(struct so_tcdbg *so_tcdbg)
 	tfp->tfp_class = so_tcdbg->so_tcdbg_tclass;
 	tfp->tfp_qos_mode = so_tcdbg->so_tcbbg_qos_mode;
 
-	lck_mtx_unlock(tclass_lock);
+	lck_mtx_unlock(&tclass_lock);
 
 	error = 0;
 done:
@@ -586,50 +594,40 @@ flush_pid_tclass(struct so_tcdbg *so_tcdbg)
 {
 	pid_t pid = so_tcdbg->so_tcdbg_pid;
 	int tclass = so_tcdbg->so_tcdbg_tclass;
-	struct filedesc *fdp;
-	int error = EINVAL;
+	struct fileproc *fp;
 	proc_t p;
-	int i;
+	int error;
 
 	p = proc_find(pid);
 	if (p == PROC_NULL) {
 		printf("%s proc_find(%d) failed\n", __func__, pid);
-		goto done;
+		return EINVAL;
 	}
 
 	proc_fdlock(p);
-	fdp = p->p_fd;
-	for (i = 0; i < fdp->fd_nfiles; i++) {
-		struct socket *so;
-		struct fileproc *fp;
 
-		fp = fdp->fd_ofiles[i];
-		if (fp == NULL ||
-		    (fdp->fd_ofileflags[i] & UF_RESERVED) != 0 ||
-		    FILEGLOB_DTYPE(fp->f_fglob) != DTYPE_SOCKET) {
+	fdt_foreach(fp, p) {
+		struct socket *so;
+
+		if (FILEGLOB_DTYPE(fp->fp_glob) != DTYPE_SOCKET) {
 			continue;
 		}
 
-		so = (struct socket *)fp->f_fglob->fg_data;
+		so = (struct socket *)fp_get_data(fp);
 		error = sock_setsockopt(so, SOL_SOCKET, SO_FLUSH, &tclass,
 		    sizeof(tclass));
 		if (error != 0) {
 			printf("%s: setsockopt(SO_FLUSH) (so=0x%llx, fd=%d, "
 			    "tclass=%d) failed %d\n", __func__,
-			    (uint64_t)VM_KERNEL_ADDRPERM(so), i, tclass,
+			    (uint64_t)VM_KERNEL_ADDRPERM(so), fdt_foreach_fd(), tclass,
 			    error);
-			error = 0;
 		}
 	}
+
 	proc_fdunlock(p);
 
-	error = 0;
-done:
-	if (p != PROC_NULL) {
-		proc_rele(p);
-	}
-
-	return error;
+	proc_rele(p);
+	return 0;
 }
 
 int
@@ -649,7 +647,7 @@ get_pid_tclass(struct so_tcdbg *so_tcdbg)
 	}
 
 	/* Need a tfp */
-	lck_mtx_lock(tclass_lock);
+	lck_mtx_lock(&tclass_lock);
 
 	tfp = find_tfp_by_pid(pid);
 	if (tfp != NULL) {
@@ -657,7 +655,7 @@ get_pid_tclass(struct so_tcdbg *so_tcdbg)
 		so_tcdbg->so_tcbbg_qos_mode = tfp->tfp_qos_mode;
 		error = 0;
 	}
-	lck_mtx_unlock(tclass_lock);
+	lck_mtx_unlock(&tclass_lock);
 done:
 	if (p != NULL) {
 		proc_rele(p);
@@ -675,7 +673,7 @@ get_pname_tclass(struct so_tcdbg *so_tcdbg)
 	so_tcdbg->so_tcdbg_tclass = SO_TC_UNSPEC; /* Means not set */
 
 	/* Need a tfp */
-	lck_mtx_lock(tclass_lock);
+	lck_mtx_lock(&tclass_lock);
 
 	tfp = find_tfp_by_pname(so_tcdbg->so_tcdbg_pname);
 	if (tfp != NULL) {
@@ -683,7 +681,7 @@ get_pname_tclass(struct so_tcdbg *so_tcdbg)
 		so_tcdbg->so_tcbbg_qos_mode = tfp->tfp_qos_mode;
 		error = 0;
 	}
-	lck_mtx_unlock(tclass_lock);
+	lck_mtx_unlock(&tclass_lock);
 
 	return error;
 }
@@ -695,7 +693,7 @@ delete_tclass_for_pid_pname(struct so_tcdbg *so_tcdbg)
 	pid_t pid = so_tcdbg->so_tcdbg_pid;
 	struct tclass_for_proc *tfp = NULL;
 
-	lck_mtx_lock(tclass_lock);
+	lck_mtx_lock(&tclass_lock);
 
 	if (pid != -1) {
 		tfp = find_tfp_by_pid(pid);
@@ -708,7 +706,7 @@ delete_tclass_for_pid_pname(struct so_tcdbg *so_tcdbg)
 		error = 0;
 	}
 
-	lck_mtx_unlock(tclass_lock);
+	lck_mtx_unlock(&tclass_lock);
 
 	return error;
 }
@@ -793,9 +791,9 @@ sogetopt_tcdbg(struct socket *so, struct sockopt *sopt)
 		break;
 
 	case SO_TCDBG_COUNT:
-		lck_mtx_lock(tclass_lock);
+		lck_mtx_lock(&tclass_lock);
 		so_tcdbg.so_tcdbg_count = tfp_count;
-		lck_mtx_unlock(tclass_lock);
+		lck_mtx_unlock(&tclass_lock);
 		break;
 
 	case SO_TCDBG_LIST: {
@@ -803,22 +801,22 @@ sogetopt_tcdbg(struct socket *so, struct sockopt *sopt)
 		int n, alloc_count;
 		struct so_tcdbg *ptr;
 
-		lck_mtx_lock(tclass_lock);
+		lck_mtx_lock(&tclass_lock);
 		if ((alloc_count = tfp_count) == 0) {
-			lck_mtx_unlock(tclass_lock);
+			lck_mtx_unlock(&tclass_lock);
 			error = EINVAL;
 			break;
 		}
 		len = alloc_count * sizeof(struct so_tcdbg);
-		lck_mtx_unlock(tclass_lock);
+		lck_mtx_unlock(&tclass_lock);
 
-		buf = _MALLOC(len, M_TEMP, M_WAITOK | M_ZERO);
+		buf = kalloc_data(len, Z_WAITOK | Z_ZERO);
 		if (buf == NULL) {
 			error = ENOBUFS;
 			break;
 		}
 
-		lck_mtx_lock(tclass_lock);
+		lck_mtx_lock(&tclass_lock);
 		n = 0;
 		ptr = (struct so_tcdbg *)buf;
 		TAILQ_FOREACH(tfp, &tfp_head, tfp_link) {
@@ -840,7 +838,7 @@ sogetopt_tcdbg(struct socket *so, struct sockopt *sopt)
 			ptr++;
 		}
 
-		lck_mtx_unlock(tclass_lock);
+		lck_mtx_unlock(&tclass_lock);
 	}
 	break;
 
@@ -857,7 +855,7 @@ sogetopt_tcdbg(struct socket *so, struct sockopt *sopt)
 			    sizeof(struct so_tcdbg));
 		} else {
 			error = sooptcopyout(sopt, buf, len);
-			_FREE(buf, M_TEMP);
+			kfree_data(buf, len);
 		}
 	}
 	return error;
@@ -934,7 +932,7 @@ so_set_traffic_class(struct socket *so, int optval)
 			int oldval = so->so_traffic_class;
 
 			VERIFY(SO_VALID_TC(optval));
-			so->so_traffic_class = optval;
+			so->so_traffic_class = (uint16_t)optval;
 
 			if ((SOCK_DOM(so) == PF_INET ||
 			    SOCK_DOM(so) == PF_INET6) &&
@@ -980,7 +978,7 @@ so_set_net_service_type(struct socket *so, int netsvctype)
 	if (error != 0) {
 		return error;
 	}
-	so->so_netsvctype = netsvctype;
+	so->so_netsvctype = (int8_t)netsvctype;
 	so->so_flags1 |= SOF1_TC_NET_SERV_TYPE;
 
 	return 0;
@@ -1051,7 +1049,7 @@ so_tc_from_control(struct mbuf *control, int *out_netsvctype)
 			 * passed using SO_TRAFFIC_CLASS
 			 */
 			val = val - SO_TC_NET_SERVICE_OFFSET;
-		/* FALLTHROUGH */
+			OS_FALLTHROUGH;
 		case SO_NET_SERVICE_TYPE:
 			if (!IS_VALID_NET_SERVICE_TYPE(val)) {
 				break;
@@ -1123,7 +1121,7 @@ so_inc_recv_data_stat(struct socket *so, size_t pkts, size_t bytes,
 static inline int
 so_throttle_best_effort(struct socket *so, struct ifnet *ifp)
 {
-	uint32_t uptime = net_uptime();
+	uint32_t uptime = (uint32_t)net_uptime();
 	return soissrcbesteffort(so) &&
 	       net_io_policy_throttle_best_effort == 1 &&
 	       ifp->if_rt_sendts > 0 &&
@@ -1152,7 +1150,7 @@ set_tcp_stream_priority(struct socket *so)
 	}
 
 	outifp = inp->inp_last_outifp;
-	uptime = net_uptime();
+	uptime = (uint32_t)net_uptime();
 
 	/*
 	 * If the socket was marked as a background socket or if the
@@ -1169,9 +1167,10 @@ set_tcp_stream_priority(struct socket *so)
 	if (outifp != NULL) {
 		/*
 		 * If the traffic source is background, check if
-		 * if it can be switched to foreground. This can
-		 * happen when there is no indication of foreground
-		 * activity.
+		 * there is recent foreground activity which should
+		 * continue to keep the traffic source as background.
+		 * Otherwise, we can switch the traffic source to
+		 * foreground.
 		 */
 		if (soissrcbackground(so) && outifp->if_fg_sendts > 0 &&
 		    (int)(uptime - outifp->if_fg_sendts) <= TCP_BG_SWITCH_TIME) {
@@ -1203,15 +1202,13 @@ set_tcp_stream_priority(struct socket *so)
 		 * loopback, do not use background congestion
 		 * control algorithm.
 		 *
-		 * If there has been recent foreground activity or if
-		 * there was an indication that a foreground application
+		 * If there has been recent foreground activity or if there
+		 * was an indication that a real time foreground application
 		 * is going to use networking (net_io_policy_throttled),
-		 * switch the backgroung streams to use background
-		 * congestion control algorithm. Otherwise, even background
-		 * flows can move into foreground.
+		 * switch the background and best effort streams to use background
+		 * congestion control algorithm.
 		 */
-		if ((sotcdb & SOTCDB_NO_SENDTCPBG) != 0 || is_local ||
-		    !IS_SO_TC_BACKGROUNDSYSTEM(so->so_traffic_class)) {
+		if ((sotcdb & SOTCDB_NO_SENDTCPBG) != 0 || is_local) {
 			if (old_cc == TCP_CC_ALGO_BACKGROUND_INDEX) {
 				tcp_set_foreground_cc(so);
 			}
@@ -1222,13 +1219,16 @@ set_tcp_stream_priority(struct socket *so)
 		}
 
 		/* Set receive side background flags */
-		if ((sotcdb & SOTCDB_NO_RECVTCPBG) != 0 || is_local ||
-		    !IS_SO_TC_BACKGROUNDSYSTEM(so->so_traffic_class)) {
+		if ((sotcdb & SOTCDB_NO_RECVTCPBG) != 0 || is_local) {
 			tcp_clear_recv_bg(so);
 		} else {
 			tcp_set_recv_bg(so);
 		}
 	} else {
+		/*
+		 * If there is no recent foreground activity, even the
+		 * background flows can use foreground congestion controller.
+		 */
 		tcp_clear_recv_bg(so);
 		if (old_cc == TCP_CC_ALGO_BACKGROUND_INDEX) {
 			tcp_set_foreground_cc(so);
@@ -1354,17 +1354,6 @@ so_tc_update_stats(struct mbuf *m, struct socket *so, mbuf_svc_class_t msc)
 	so->so_tc_stats[mtc].txbytes += m->m_pkthdr.len;
 }
 
-__private_extern__ void
-socket_tclass_init(void)
-{
-	_CASSERT(_SO_TC_MAX == SO_TC_STATS_MAX);
-
-	tclass_lck_grp_attr = lck_grp_attr_alloc_init();
-	tclass_lck_grp = lck_grp_alloc_init("tclass", tclass_lck_grp_attr);
-	tclass_lck_attr = lck_attr_alloc_init();
-	lck_mtx_init(tclass_lock, tclass_lck_grp, tclass_lck_attr);
-}
-
 __private_extern__ mbuf_svc_class_t
 so_tc2msc(int tc)
 {
@@ -1445,34 +1434,6 @@ so_svc2tc(mbuf_svc_class_t svc)
 	case MBUF_SC_UNSPEC:
 	default:
 		return SO_TC_BE;
-	}
-}
-
-/*
- * LRO is turned on for AV streaming class.
- */
-void
-so_set_lro(struct socket *so, int optval)
-{
-	if (optval == SO_TC_AV) {
-		so->so_flags |= SOF_USELRO;
-	} else {
-		if (so->so_flags & SOF_USELRO) {
-			/* transition to non LRO class */
-			so->so_flags &= ~SOF_USELRO;
-			struct inpcb *inp = sotoinpcb(so);
-			struct tcpcb *tp = NULL;
-			if (inp) {
-				tp = intotcpcb(inp);
-				if (tp && (tp->t_flagsext & TF_LRO_OFFLOADED)) {
-					tcp_lro_remove_state(inp->inp_laddr,
-					    inp->inp_faddr,
-					    inp->inp_lport,
-					    inp->inp_fport);
-					tp->t_flagsext &= ~TF_LRO_OFFLOADED;
-				}
-			}
-		}
 	}
 }
 
@@ -1575,10 +1536,10 @@ rfc4594_sc_to_dscp(uint32_t svc_class)
 		dscp = _DSCP_CS1;
 		break;
 
-	case MBUF_SC_BE:                        /* Standard */
+	case MBUF_SC_BE:                /* Standard */
 		dscp = _DSCP_DF;
 		break;
-	case MBUF_SC_RD:                        /* Low-Latency Data */
+	case MBUF_SC_RD:                /* Low-Latency Data */
 		dscp = _DSCP_AF21;
 		break;
 
@@ -1590,20 +1551,20 @@ rfc4594_sc_to_dscp(uint32_t svc_class)
 
 	/* SVC_CLASS Not Defined:  Broadcast Video */
 
-	case MBUF_SC_AV:                        /* Multimedia Streaming */
+	case MBUF_SC_AV:                /* Multimedia Streaming */
 		dscp = _DSCP_AF31;
 		break;
-	case MBUF_SC_RV:                        /* Real-Time Interactive */
+	case MBUF_SC_RV:                /* Real-Time Interactive */
 		dscp = _DSCP_CS4;
 		break;
-	case MBUF_SC_VI:                        /* Multimedia Conferencing */
+	case MBUF_SC_VI:                /* Multimedia Conferencing */
 		dscp = _DSCP_AF41;
 		break;
 	case MBUF_SC_SIG:               /* Signaling */
 		dscp = _DSCP_CS5;
 		break;
 
-	case MBUF_SC_VO:                        /* Telephony */
+	case MBUF_SC_VO:                /* Telephony */
 		dscp = _DSCP_EF;
 		break;
 	case MBUF_SC_CTL:               /* Network Control*/
@@ -1711,45 +1672,34 @@ set_netsvctype_dscp_map(struct net_qos_dscp_map *net_qos_dscp_map,
 			ASSERT(0);
 		}
 	}
-	/* Network control socket traffic class is always best effort */
-	net_qos_dscp_map->sotc_to_dscp[SOTCIX_CTL] = _DSCP_DF;
+	if (net_qos_dscp_map == &fastlane_net_qos_dscp_map) {
+		/* Network control socket traffic class is always best effort for fastlane*/
+		net_qos_dscp_map->sotc_to_dscp[SOTCIX_CTL] = _DSCP_DF;
+	} else {
+		net_qos_dscp_map->sotc_to_dscp[SOTCIX_CTL] = _DSCP_CS6;
+	}
 
-	/* Backround socket traffic class DSCP same as backround system */
-	net_qos_dscp_map->sotc_to_dscp[SOTCIX_BK] =
-	    net_qos_dscp_map->sotc_to_dscp[SOTCIX_BK_SYS];
+	/* Background system socket traffic class DSCP same as background */
+	net_qos_dscp_map->sotc_to_dscp[SOTCIX_BK_SYS] =
+	    net_qos_dscp_map->sotc_to_dscp[SOTCIX_BK];
 
 	return 0;
 }
 
-/*
- * out_count is an input/ouput parameter
- */
-static errno_t
-get_netsvctype_dscp_map(size_t *out_count,
-    struct netsvctype_dscp_map *netsvctype_dscp_map)
+static size_t
+get_netsvctype_dscp_map(struct netsvctype_dscp_map *netsvctype_dscp_map)
 {
-	size_t i;
-	struct net_qos_dscp_map *net_qos_dscp_map = NULL;
-
-	/*
-	 * Do not accept more that max number of distinct DSCPs
-	 */
-	if (out_count == NULL || netsvctype_dscp_map == NULL) {
-		return EINVAL;
-	}
-	if (*out_count > _MAX_DSCP) {
-		return EINVAL;
-	}
+	struct net_qos_dscp_map *net_qos_dscp_map;
+	int i;
 
 	net_qos_dscp_map = &fastlane_net_qos_dscp_map;
 
-	for (i = 0; i < MIN(_NET_SERVICE_TYPE_COUNT, *out_count); i++) {
+	for (i = 0; i < _NET_SERVICE_TYPE_COUNT; i++) {
 		netsvctype_dscp_map[i].netsvctype = i;
 		netsvctype_dscp_map[i].dscp = net_qos_dscp_map->netsvctype_to_dscp[i];
 	}
-	*out_count = i;
 
-	return 0;
+	return i * sizeof(struct netsvctype_dscp_map);
 }
 
 void
@@ -1765,6 +1715,13 @@ net_qos_map_init()
 	    rfc4594_netsvctype_dscp_map);
 	ASSERT(error == 0);
 
+#if (DEBUG || DEVELOPMENT)
+	error = set_netsvctype_dscp_map(&custom_net_qos_dscp_map,
+	    rfc4594_netsvctype_dscp_map);
+	ASSERT(error == 0);
+
+#endif /* (DEBUG || DEVELOPMENT) */
+
 	set_dscp_to_wifi_ac_map(default_dscp_to_wifi_ac_map, 1);
 }
 
@@ -1773,20 +1730,16 @@ sysctl_default_netsvctype_to_dscp_map SYSCTL_HANDLER_ARGS
 {
 #pragma unused(oidp, arg1, arg2)
 	int error = 0;
-	size_t len;
-	struct netsvctype_dscp_map netsvctype_dscp_map[_NET_SERVICE_TYPE_COUNT] = {};
-	size_t count;
 
 	if (req->oldptr == USER_ADDR_NULL) {
 		req->oldidx =
 		    _NET_SERVICE_TYPE_COUNT * sizeof(struct netsvctype_dscp_map);
 	} else if (req->oldlen > 0) {
-		count = _NET_SERVICE_TYPE_COUNT;
-		error = get_netsvctype_dscp_map(&count, netsvctype_dscp_map);
-		if (error != 0) {
-			goto done;
-		}
-		len = count * sizeof(struct netsvctype_dscp_map);
+		struct netsvctype_dscp_map netsvctype_dscp_map[_NET_SERVICE_TYPE_COUNT] = {};
+		size_t len;
+
+		len = get_netsvctype_dscp_map(netsvctype_dscp_map);
+
 		error = SYSCTL_OUT(req, netsvctype_dscp_map,
 		    MIN(len, req->oldlen));
 		if (error != 0) {
@@ -1821,6 +1774,11 @@ set_packet_qos(struct mbuf *m, struct ifnet *ifp, boolean_t qos_allowed,
 		case IFRTYPE_QOSMARKING_RFC4594:
 			net_qos_dscp_map = &rfc4594_net_qos_dscp_map;
 			break;
+#if (DEBUG || DEVELOPMENT)
+		case IFRTYPE_QOSMARKING_CUSTOM:
+			net_qos_dscp_map = &custom_net_qos_dscp_map;
+			break;
+#endif /* (DEBUG || DEVELOPMENT) */
 		default:
 			panic("invalid QoS marking type");
 			/* NOTREACHED */
@@ -1981,11 +1939,12 @@ sysctl_dscp_to_wifi_ac_map SYSCTL_HANDLER_ARGS
 	struct netsvctype_dscp_map netsvctype_dscp_map[DSCP_ARRAY_SIZE] = {};
 	struct dcsp_msc_map dcsp_msc_map[DSCP_ARRAY_SIZE];
 	size_t count;
-	uint32_t i;
 
 	if (req->oldptr == USER_ADDR_NULL) {
 		req->oldidx = len;
 	} else if (req->oldlen > 0) {
+		uint8_t i;
+
 		for (i = 0; i < DSCP_ARRAY_SIZE; i++) {
 			netsvctype_dscp_map[i].dscp = i;
 			netsvctype_dscp_map[i].netsvctype =
@@ -2045,6 +2004,13 @@ sysctl_reset_dscp_to_wifi_ac_map SYSCTL_HANDLER_ARGS
 
 	error = sysctl_handle_int(oidp, &val, 0, req);
 	if (error || !req->newptr) {
+		return error;
+	}
+	if (req->newptr == USER_ADDR_NULL) {
+		return 0;
+	}
+	error = proc_suser(current_proc());
+	if (error != 0) {
 		return error;
 	}
 
@@ -2142,3 +2108,181 @@ net_qos_guideline(struct proc *p, struct net_qos_guideline_args *arg,
 #undef  RETURN_USE_DEFAULT
 	return 0;
 }
+
+#if (DEBUG || DEVELOPMENT)
+/*
+ * Customizable QoS mapping table
+ * By default it uses the mapping table for RFC 4594
+ *
+ * Notes:
+ *   BK_SYS is the same as BK
+ *   CTL cannot be changed and is always _DSCP_CS6
+ */
+SYSCTL_NODE(_net_qos, OID_AUTO, custom,
+    CTLFLAG_RW | CTLFLAG_LOCKED, 0, "");
+
+SYSCTL_NODE(_net_qos_custom, OID_AUTO, netsvctype_to_dscp,
+    CTLFLAG_RW | CTLFLAG_LOCKED, 0, "");
+
+static int sysctl_net_qos_custom_netsvctype_to_dscp SYSCTL_HANDLER_ARGS;
+SYSCTL_PROC(_net_qos_custom_netsvctype_to_dscp, OID_AUTO, be,
+    CTLTYPE_INT | CTLFLAG_WR | CTLFLAG_LOCKED,
+    0, NET_SERVICE_TYPE_BE, sysctl_net_qos_custom_netsvctype_to_dscp, "I", "");
+SYSCTL_PROC(_net_qos_custom_netsvctype_to_dscp, OID_AUTO, bk,
+    CTLTYPE_INT | CTLFLAG_WR | CTLFLAG_LOCKED,
+    0, NET_SERVICE_TYPE_BK, sysctl_net_qos_custom_netsvctype_to_dscp, "I", "");
+SYSCTL_PROC(_net_qos_custom_netsvctype_to_dscp, OID_AUTO, sig,
+    CTLTYPE_INT | CTLFLAG_WR | CTLFLAG_LOCKED,
+    0, NET_SERVICE_TYPE_SIG, sysctl_net_qos_custom_netsvctype_to_dscp, "I", "");
+SYSCTL_PROC(_net_qos_custom_netsvctype_to_dscp, OID_AUTO, vi,
+    CTLTYPE_INT | CTLFLAG_WR | CTLFLAG_LOCKED,
+    0, NET_SERVICE_TYPE_VI, sysctl_net_qos_custom_netsvctype_to_dscp, "I", "");
+SYSCTL_PROC(_net_qos_custom_netsvctype_to_dscp, OID_AUTO, vo,
+    CTLTYPE_INT | CTLFLAG_WR | CTLFLAG_LOCKED,
+    0, NET_SERVICE_TYPE_VO, sysctl_net_qos_custom_netsvctype_to_dscp, "I", "");
+SYSCTL_PROC(_net_qos_custom_netsvctype_to_dscp, OID_AUTO, rv,
+    CTLTYPE_INT | CTLFLAG_WR | CTLFLAG_LOCKED,
+    0, NET_SERVICE_TYPE_RV, sysctl_net_qos_custom_netsvctype_to_dscp, "I", "");
+SYSCTL_PROC(_net_qos_custom_netsvctype_to_dscp, OID_AUTO, av,
+    CTLTYPE_INT | CTLFLAG_WR | CTLFLAG_LOCKED,
+    0, NET_SERVICE_TYPE_AV, sysctl_net_qos_custom_netsvctype_to_dscp, "I", "");
+SYSCTL_PROC(_net_qos_custom_netsvctype_to_dscp, OID_AUTO, oam,
+    CTLTYPE_INT | CTLFLAG_WR | CTLFLAG_LOCKED,
+    0, NET_SERVICE_TYPE_OAM, sysctl_net_qos_custom_netsvctype_to_dscp, "I", "");
+SYSCTL_PROC(_net_qos_custom_netsvctype_to_dscp, OID_AUTO, rd,
+    CTLTYPE_INT | CTLFLAG_WR | CTLFLAG_LOCKED,
+    0, NET_SERVICE_TYPE_RD, sysctl_net_qos_custom_netsvctype_to_dscp, "I", "");
+
+static int sysctl_net_qos_custom_reset SYSCTL_HANDLER_ARGS;
+SYSCTL_PROC(_net_qos_custom, OID_AUTO, reset,
+    CTLTYPE_INT | CTLFLAG_WR | CTLFLAG_LOCKED,
+    0, 0, sysctl_net_qos_custom_reset, "I", "");
+
+int
+sysctl_net_qos_custom_netsvctype_to_dscp SYSCTL_HANDLER_ARGS
+{
+#pragma unused(arg1)
+	int error = 0;
+
+	switch (arg2) {
+	case NET_SERVICE_TYPE_BE:
+	case NET_SERVICE_TYPE_BK:
+	case NET_SERVICE_TYPE_SIG:
+	case NET_SERVICE_TYPE_VI:
+	case NET_SERVICE_TYPE_VO:
+	case NET_SERVICE_TYPE_RV:
+	case NET_SERVICE_TYPE_AV:
+	case NET_SERVICE_TYPE_OAM:
+	case NET_SERVICE_TYPE_RD:
+		break;
+	default:
+		os_log(OS_LOG_DEFAULT, "%s: unexpected netsvctype %d",
+		    __func__, arg2);
+		return EINVAL;
+	}
+
+	int val = custom_net_qos_dscp_map.netsvctype_to_dscp[arg2];
+	error = sysctl_handle_int(oidp, &val, 0, req);
+	if (error != 0 || req->newptr == USER_ADDR_NULL) {
+		return error;
+	}
+	if (req->newptr == USER_ADDR_NULL) {
+		return 0;
+	}
+	error = proc_suser(current_proc());
+	if (error != 0) {
+		return error;
+	}
+	if (val < 0 || val > _MAX_DSCP) {
+		os_log(OS_LOG_DEFAULT, "%s: unexpected DSCP %d",
+		    __func__, val);
+		return EINVAL;
+	}
+
+	struct netsvctype_dscp_map netsvctype_dscp_map[_NET_SERVICE_TYPE_COUNT] = {};
+
+	for (int i = 0; i < _NET_SERVICE_TYPE_COUNT; i++) {
+		netsvctype_dscp_map[i].netsvctype = i;
+		netsvctype_dscp_map[i].dscp = custom_net_qos_dscp_map.netsvctype_to_dscp[i];
+	}
+	netsvctype_dscp_map[arg2].dscp = (uint8_t) val;
+
+	error = set_netsvctype_dscp_map(&custom_net_qos_dscp_map,
+	    netsvctype_dscp_map);
+
+	return 0;
+}
+
+int
+sysctl_net_qos_custom_reset SYSCTL_HANDLER_ARGS
+{
+#pragma unused(arg1, arg2)
+	int error = 0;
+	int val = 0;
+
+	error = sysctl_handle_int(oidp, &val, 0, req);
+	if (error || !req->newptr) {
+		return error;
+	}
+	if (req->newptr == USER_ADDR_NULL) {
+		return 0;
+	}
+	error = proc_suser(current_proc());
+	if (error != 0) {
+		return error;
+	}
+
+	error = set_netsvctype_dscp_map(&custom_net_qos_dscp_map,
+	    rfc4594_netsvctype_dscp_map);
+
+	return error;
+}
+
+uint8_t
+custom_sc_to_dscp(uint32_t svc_class)
+{
+	uint8_t dscp = _DSCP_DF;
+
+	switch (svc_class) {
+	case MBUF_SC_BK_SYS:
+		dscp = custom_net_qos_dscp_map.sotc_to_dscp[SOTCIX_BK_SYS];
+		break;
+	case MBUF_SC_BK:
+		dscp = custom_net_qos_dscp_map.sotc_to_dscp[SOTCIX_BK];
+		break;
+
+	case MBUF_SC_BE:
+		dscp = custom_net_qos_dscp_map.sotc_to_dscp[SOTCIX_BE];
+		break;
+	case MBUF_SC_RD:
+		dscp = custom_net_qos_dscp_map.sotc_to_dscp[SOTCIX_RD];
+		break;
+	case MBUF_SC_OAM:
+		dscp = custom_net_qos_dscp_map.sotc_to_dscp[SOTCIX_OAM];
+		break;
+
+	case MBUF_SC_AV:
+		dscp = custom_net_qos_dscp_map.sotc_to_dscp[SOTCIX_AV];
+		break;
+	case MBUF_SC_RV:
+		dscp = custom_net_qos_dscp_map.sotc_to_dscp[SOTCIX_RV];
+		break;
+	case MBUF_SC_VI:
+		dscp = custom_net_qos_dscp_map.sotc_to_dscp[SOTCIX_VI];
+		break;
+	case MBUF_SC_SIG:
+		dscp = custom_net_qos_dscp_map.netsvctype_to_dscp[NET_SERVICE_TYPE_SIG];
+		break;
+
+	case MBUF_SC_VO:
+		dscp = custom_net_qos_dscp_map.sotc_to_dscp[SOTCIX_VO];
+		break;
+	case MBUF_SC_CTL:
+		dscp = custom_net_qos_dscp_map.sotc_to_dscp[SOTCIX_CTL];
+		break;
+	default:
+		break;
+	}
+	return dscp;
+}
+#endif /* (DEBUG || DEVELOPMENT) */

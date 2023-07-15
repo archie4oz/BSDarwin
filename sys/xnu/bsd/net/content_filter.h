@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2013-2019, 2022 Apple Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  *
@@ -38,6 +38,10 @@
 #include <sys/socketvar.h>
 #endif /* BSD_KERNEL_PRIVATE */
 
+#ifndef XNU_KERNEL_PRIVATE
+#include <TargetConditionals.h>
+#endif
+
 __BEGIN_DECLS
 
 #ifdef PRIVATE
@@ -72,6 +76,12 @@ typedef uint64_t cfil_sock_id_t;
 #define CFIL_OPT_GET_SOCKET_INFO        2       /* uint32_t */
 
 /*
+ * CFIL_OPT_PRESERVE_CONNECTIONS
+ * To set or get the preserve-connections setting for the filter
+ */
+#define CFIL_OPT_PRESERVE_CONNECTIONS   3       /* uint32_t */
+
+/*
  * struct cfil_opt_sock_info
  *
  * Contains information about a socket that is being filtered.
@@ -92,12 +102,8 @@ struct cfil_opt_sock_info {
 /*
  * How many filter may be active simultaneously
  */
-#if !TARGET_OS_OSX && !defined(XNU_TARGET_OS_OSX)
-#define CFIL_MAX_FILTER_COUNT   2
-#else
-#define CFIL_MAX_FILTER_COUNT   8
-#endif
 
+#define CFIL_MAX_FILTER_COUNT   8
 
 /*
  * Crypto Support
@@ -180,7 +186,10 @@ struct cfil_msg_hdr {
 #define CFS_CONNECTION_DIR_IN  0
 #define CFS_CONNECTION_DIR_OUT 1
 
-#define CFS_AUDIT_TOKEN            1
+#define CFS_REAL_AUDIT_TOKEN            1
+
+#define CFS_MAX_DOMAIN_NAME_LENGTH 256
+
 
 /*
  * struct cfil_msg_sock_attached
@@ -208,8 +217,10 @@ struct cfil_msg_sock_attached {
 	union sockaddr_in_4_6   cfs_dst;
 	int                     cfs_conn_dir;
 	unsigned int            cfs_audit_token[8];             /* Must match audit_token_t */
+	unsigned int            cfs_real_audit_token[8];        /* Must match audit_token_t */
 	cfil_crypto_signature   cfs_signature;
 	uint32_t                cfs_signature_length;
+	char                    cfs_remote_domain_name[CFS_MAX_DOMAIN_NAME_LENGTH];
 };
 
 /*
@@ -495,6 +506,8 @@ struct cfil_stats {
 
 #define M_SKIPCFIL      M_PROTO5
 
+#define CFIL_DGRAM_FILTERED(so) ((so->so_flags & SOF_CONTENT_FILTER) && (so->so_flow_db != NULL))
+
 extern int cfil_log_level;
 
 #define CFIL_LOG(level, fmt, ...) \
@@ -515,10 +528,10 @@ extern errno_t cfil_sock_detach(struct socket *so);
 
 extern int cfil_sock_data_out(struct socket *so, struct sockaddr  *to,
     struct mbuf *data, struct mbuf *control,
-    uint32_t flags);
+    uint32_t flags, struct soflow_hash_entry *);
 extern int cfil_sock_data_in(struct socket *so, struct sockaddr *from,
     struct mbuf *data, struct mbuf *control,
-    uint32_t flags);
+    uint32_t flags, struct soflow_hash_entry *);
 
 extern int cfil_sock_shutdown(struct socket *so, int *how);
 extern void cfil_sock_is_closed(struct socket *so);
@@ -530,9 +543,10 @@ extern int cfil_sock_data_space(struct sockbuf *sb);
 extern void cfil_sock_buf_update(struct sockbuf *sb);
 
 extern cfil_sock_id_t cfil_sock_id_from_socket(struct socket *so);
+extern cfil_sock_id_t cfil_sock_id_from_datagram_socket(struct socket *so, struct sockaddr *local, struct sockaddr *remote);
 
 extern struct m_tag *cfil_dgram_get_socket_state(struct mbuf *m, uint32_t *state_change_cnt,
-    short *options, struct sockaddr **faddr, int *inp_flags);
+    uint32_t *options, struct sockaddr **faddr, int *inp_flags);
 extern boolean_t cfil_dgram_peek_socket_state(struct mbuf *m, int *inp_flags);
 
 #endif /* BSD_KERNEL_PRIVATE */

@@ -4,10 +4,6 @@ _VNOP_IOCTL
 _VNOP_READ
 _VNOP_STRATEGY
 _VNOP_WRITE
-__FREE
-__FREE_ZONE
-__MALLOC:__MALLOC_external
-__MALLOC_ZONE:__MALLOC_ZONE_external
 _advisory_read
 _advisory_read_ext
 _bcd2bin_data
@@ -17,6 +13,8 @@ _bdevsw_remove
 _bpf_attach
 _bpf_tap_in
 _bpf_tap_out
+_bpf_tap_packet_in
+_bpf_tap_packet_out
 _bpfattach
 _bsd_timeout
 _bsd_untimeout
@@ -54,7 +52,9 @@ _buf_invalblkno
 _buf_invalidateblks
 _buf_iterate
 _buf_lblkno
+_buf_lblksize
 _buf_map
+_buf_map_range
 _buf_markaged
 _buf_markclean
 _buf_markdelayed
@@ -80,6 +80,7 @@ _buf_seterror
 _buf_setflags
 _buf_setfsprivate
 _buf_setlblkno
+_buf_setlblksize
 _buf_set_redundancy_flags
 _buf_setresid
 _buf_setsize
@@ -88,6 +89,7 @@ _buf_setvnode
 _buf_size
 _buf_strategy
 _buf_unmap
+_buf_unmap_range
 _buf_upl
 _buf_uploffset
 _buf_valid
@@ -202,6 +204,7 @@ _futimes
 _fuword
 _groupmember
 _hashinit
+_hashdestroy
 _ifaddr_address
 _ifaddr_address_family
 _ifaddr_dstaddress
@@ -353,6 +356,7 @@ _kernel_debug1
 _kernel_debug_filtered
 _kernel_debug_enter
 _kernel_debug_register_callback
+_kdebug_register_coproc
 _kernproc
 _kev_msg_post
 _kev_vendor_code_find
@@ -428,6 +432,7 @@ _microtime
 _microuptime
 _minphys
 _msleep
+_msleep0
 _nanotime
 _nanouptime
 _nd6_lookup_ipv6
@@ -477,6 +482,7 @@ _physio
 _proc_chrooted
 _proc_exiting
 _proc_find
+_proc_find_ident
 _proc_forcequota
 _proc_is64bit
 _proc_is64bit_data
@@ -531,6 +537,8 @@ _sock_listen
 _sock_nointerrupt
 _sock_receive
 _sock_receivembuf
+_sock_release
+_sock_retain
 _sock_send
 _sock_sendmbuf
 _sock_setpriv
@@ -565,7 +573,6 @@ _sysctl__machdep_children
 _sysctl__net_children
 _sysctl__sysctl_children
 _sysctl__vfs_children
-_sysctl__vfs_generic
 _sysctl__vfs_generic_children
 _sysctl__vm_children
 _sysctl_handle_int
@@ -597,9 +604,11 @@ _ubc_upl_abort_range
 _ubc_upl_commit
 _ubc_upl_commit_range
 _ubc_upl_map
+_ubc_upl_map_range
 _ubc_upl_maxbufsize
 _ubc_upl_pageinfo
 _ubc_upl_unmap
+_ubc_upl_unmap_range
 _uio_addiov
 _uio_create
 _uio_curriovbase
@@ -644,7 +653,6 @@ _vfs_clearauthcache_ttl
 _vfs_clearauthopaque
 _vfs_clearauthopaqueaccess
 _vfs_clearextendedsecurity
-_vfs_clearnoswap
 _vfs_clearflags
 _vfs_context_create
 _vfs_context_is64bit
@@ -684,7 +692,6 @@ _vfs_setauthcache_ttl
 _vfs_setauthopaque
 _vfs_setauthopaqueaccess
 _vfs_setextendedsecurity
-_vfs_setnoswap
 _vfs_setflags
 _vfs_setfsprivate
 _vfs_setioattr
@@ -771,6 +778,7 @@ _vnode_vid
 _vnode_isonexternalstorage
 _vnode_vtype
 _vnode_waitforwrites
+_vnode_willberecycled
 _vnode_writedone
 _vnop_access_desc
 _vnop_advlock_desc
@@ -822,6 +830,10 @@ _vnop_strategy_desc
 _vnop_symlink_desc
 _vnop_whiteout_desc
 _vnop_write_desc
+_vsock_add_transport
+_vsock_put_message
+_vsock_remove_transport
+_vsock_reset_transport
 _vttoif_tab
 _wakeup
 _wakeup_one

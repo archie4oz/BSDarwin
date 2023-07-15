@@ -42,7 +42,7 @@
 #include <kern/queue.h>
 
 __BEGIN_DECLS
-int debug_ivars_size;
+size_t debug_ivars_size;
 __END_DECLS
 
 
@@ -280,6 +280,17 @@ OSObject::serialize(OSSerialize *s) const
 	return ok;
 }
 
+/*
+ * Ignore -Wxnu-typed-allocators for the operator new/delete implementations
+ */
+__typed_allocators_ignore_push
+
+/*
+ * Given that all OSObjects have been transitioned to use
+ * OSObject_typed_operator_new/OSObject_typed_operator_delete, this should
+ * only be called from kexts that havent recompiled to use the new
+ * definitions.
+ */
 void *
 OSObject::operator new(size_t size)
 {
@@ -289,9 +300,44 @@ OSObject::operator new(size_t size)
 	}
 #endif
 
-	void * mem = kalloc_tag_bt(size, VM_KERN_MEMORY_LIBKERN);
+	void *mem = kheap_alloc(KHEAP_DEFAULT, size,
+	    Z_VM_TAG_BT(Z_WAITOK_ZERO, VM_KERN_MEMORY_LIBKERN));
 	assert(mem);
-	bzero(mem, size);
+	OSIVAR_ACCUMSIZE(size);
+
+	return (void *) mem;
+}
+
+void *
+OSObject_typed_operator_new(kalloc_type_view_t ktv, vm_size_t size)
+{
+#if IOTRACKING
+	if (kIOTracking & gIOKitDebug) {
+		return OSMetaClass::trackedNew(size);
+	}
+#endif
+
+	/*
+	 * Some classes in kexts that subclass from iokit classes
+	 * don't use OSDeclare/OSDefine to declare/define structors.
+	 * When operator new is called on such objects they end up
+	 * using the parent's operator new/delete. If we detect such
+	 * a case we default to using kalloc rather than kalloc_type
+	 */
+	void *mem = NULL;
+	if (size <= kalloc_type_get_size(ktv->kt_size)) {
+		/*
+		 * OSObject_typed_operator_new can be called from kexts,
+		 * use the external symbol for kalloc_type_impl as
+		 * kalloc_type_views generated at some external callsites
+		 * many not have been processed during boot.
+		 */
+		mem = kalloc_type_impl_external(ktv, Z_WAITOK_ZERO);
+	} else {
+		mem = kheap_alloc(KHEAP_DEFAULT, size,
+		    Z_VM_TAG_BT(Z_WAITOK_ZERO, VM_KERN_MEMORY_LIBKERN));
+	}
+	assert(mem);
 	OSIVAR_ACCUMSIZE(size);
 
 	return (void *) mem;
@@ -310,9 +356,33 @@ OSObject::operator delete(void * mem, size_t size)
 	}
 #endif
 
-	kfree(mem, size);
+	kheap_free(KHEAP_DEFAULT, mem, size);
 	OSIVAR_ACCUMSIZE(-size);
 }
+
+void
+OSObject_typed_operator_delete(kalloc_type_view_t ktv, void * mem,
+    vm_size_t size)
+{
+	if (!mem) {
+		return;
+	}
+
+#if IOTRACKING
+	if (kIOTracking & gIOKitDebug) {
+		return OSMetaClass::trackedDelete(mem, size);
+	}
+#endif
+
+	if (size <= kalloc_type_get_size(ktv->kt_size)) {
+		kern_os_typed_free(ktv, mem, size);
+	} else {
+		kheap_free(KHEAP_DEFAULT, mem, size);
+	}
+	OSIVAR_ACCUMSIZE(-size);
+}
+
+__typed_allocators_ignore_pop
 
 bool
 OSObject::init()

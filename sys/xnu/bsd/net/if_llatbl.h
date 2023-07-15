@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016 Apple Inc. All rights reserved.
+ * Copyright (c) 2016-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -70,12 +70,12 @@ struct rt_addrinfo;
 struct llentry;
 LIST_HEAD(llentries, llentry);
 
-extern lck_rw_t                *lltable_rwlock;
-#define LLTABLE_RLOCK()         lck_rw_lock_shared(lltable_rwlock)
-#define LLTABLE_RUNLOCK()       lck_rw_done(lltable_rwlock)
-#define LLTABLE_WLOCK()         lck_rw_lock_exclusive(lltable_rwlock)
-#define LLTABLE_WUNLOCK()       lck_rw_done(lltable_rwlock)
-#define LLTABLE_LOCK_ASSERT()   LCK_RW_ASSERT(lltable_rwlock, LCK_RW_ASSERT_EXCLUSIVE)
+extern lck_rw_t                 lltable_rwlock;
+#define LLTABLE_RLOCK()         lck_rw_lock_shared(&lltable_rwlock)
+#define LLTABLE_RUNLOCK()       lck_rw_done(&lltable_rwlock)
+#define LLTABLE_WLOCK()         lck_rw_lock_exclusive(&lltable_rwlock)
+#define LLTABLE_WUNLOCK()       lck_rw_done(&lltable_rwlock)
+#define LLTABLE_LOCK_ASSERT()   LCK_RW_ASSERT(&lltable_rwlock, LCK_RW_ASSERT_EXCLUSIVE)
 
 #define LLE_MAX_LINKHDR         24      /* Full IB header */
 /*
@@ -123,8 +123,8 @@ struct llentry {
 	decl_lck_mtx_data(, req_mtx);
 };
 
-extern lck_grp_t      *lle_lock_grp;
-extern lck_attr_t     *lle_lock_attr;
+extern lck_grp_t       lle_lock_grp;
+extern lck_attr_t      lle_lock_attr;
 
 #define LLE_WLOCK(lle)          lck_rw_lock_exclusive(&(lle)->lle_lock)
 #define LLE_RLOCK(lle)          lck_rw_lock_shared(&(lle)->lle_lock)
@@ -132,12 +132,12 @@ extern lck_attr_t     *lle_lock_attr;
 #define LLE_RUNLOCK(lle)        lck_rw_done(&(lle)->lle_lock)
 #define LLE_DOWNGRADE(lle)      lck_rw_lock_exclusive_to_shared(&(lle)->lle_lock)
 #define LLE_TRY_UPGRADE(lle)    lck_rw_lock_shared_to_exclusive(&(lle)->lle_lock)
-#define LLE_LOCK_INIT(lle)      lck_rw_init(&(lle)->lle_lock, lle_lock_grp, lle_lock_attr)
-#define LLE_LOCK_DESTROY(lle)   lck_rw_destroy(&(lle)->lle_lock, lle_lock_grp)
+#define LLE_LOCK_INIT(lle)      lck_rw_init(&(lle)->lle_lock, &lle_lock_grp, &lle_lock_attr)
+#define LLE_LOCK_DESTROY(lle)   lck_rw_destroy(&(lle)->lle_lock, &lle_lock_grp)
 #define LLE_WLOCK_ASSERT(lle)   LCK_RW_ASSERT(&(lle)->lle_lock, LCK_RW_ASSERT_EXCLUSIVE)
 
-#define LLE_REQ_INIT(lle)       lck_mtx_init(&(lle)->req_mtx, lle_lock_grp, lle_lock_attr)
-#define LLE_REQ_DESTROY(lle)    lck_mtx_destroy(&(lle)->req_mtx, lle_lock_grp)
+#define LLE_REQ_INIT(lle)       lck_mtx_init(&(lle)->req_mtx, &lle_lock_grp, &lle_lock_attr)
+#define LLE_REQ_DESTROY(lle)    lck_mtx_destroy(&(lle)->req_mtx, &lle_lock_grp)
 #define LLE_REQ_LOCK(lle)       lck_mtx_lock(&(lle)->req_mtx)
 #define LLE_REQ_UNLOCK(lle)     lck_mtx_unlock(&(lle)->req_mtx)
 
@@ -171,18 +171,18 @@ extern lck_attr_t     *lle_lock_attr;
 	LLE_FREE_LOCKED(lle);                                   \
 } while (0)
 
-typedef struct llentry *(llt_lookup_t)(struct lltable *, u_int flags,
+typedef struct llentry *(llt_lookup_t)(struct lltable *, uint16_t flags,
     const struct sockaddr *l3addr);
-typedef struct llentry *(llt_alloc_t)(struct lltable *, u_int flags,
+typedef struct llentry *(llt_alloc_t)(struct lltable *, uint16_t flags,
     const struct sockaddr *l3addr);
 typedef void (llt_delete_t)(struct lltable *, struct llentry *);
 typedef void (llt_prefix_free_t)(struct lltable *,
-    const struct sockaddr *addr, const struct sockaddr *mask, u_int flags);
+    const struct sockaddr *addr, const struct sockaddr *mask, uint16_t flags);
 typedef int (llt_dump_entry_t)(struct lltable *, struct llentry *,
     struct sysctl_req *);
 typedef uint32_t (llt_hash_t)(const struct llentry *, uint32_t);
 typedef int (llt_match_prefix_t)(const struct sockaddr *,
-    const struct sockaddr *, u_int, struct llentry *);
+    const struct sockaddr *, uint16_t, struct llentry *);
 typedef void (llt_free_entry_t)(struct lltable *, struct llentry *);
 typedef void (llt_fill_sa_entry_t)(const struct llentry *, struct sockaddr *);
 typedef void (llt_free_tbl_t)(struct lltable *);
@@ -196,7 +196,7 @@ struct lltable {
 	SLIST_ENTRY(lltable)    llt_link;
 	int                     llt_af;
 	int                     llt_hsize;
-	struct llentries        *lle_head;
+	struct llentries        *__counted_by(llt_hsize) lle_head;
 	struct ifnet            *llt_ifp;
 
 	llt_lookup_t            *llt_lookup;
@@ -211,12 +211,7 @@ struct lltable {
 	llt_link_entry_t        *llt_link_entry;
 	llt_unlink_entry_t      *llt_unlink_entry;
 	llt_fill_sa_entry_t     *llt_fill_sa_entry;
-	llt_free_tbl_t          *llt_free_tbl;
 };
-
-#ifdef MALLOC_DECLARE
-MALLOC_DECLARE(M_LLTABLE);
-#endif
 
 /*
  * LLentry flags
@@ -241,12 +236,12 @@ MALLOC_DECLARE(M_LLTABLE);
 #define LLATBL_HASH(key, mask) \
     (((((((key >> 8) ^ key) >> 8) ^ key) >> 8) ^ key) & mask)
 
-void lltable_glbl_init(void);
 struct lltable *lltable_allocate_htbl(uint32_t hsize);
+void lltable_purge(struct lltable *);
 void lltable_free(struct lltable *);
 void lltable_link(struct lltable *llt);
 void lltable_prefix_free(int, struct sockaddr *,
-    struct sockaddr *, u_int);
+    struct sockaddr *, uint16_t);
 #if 0
 void            lltable_drain(int);
 #endif
@@ -266,7 +261,7 @@ int lltable_try_set_entry_addr(struct ifnet *ifp, struct llentry *lle,
 int lltable_calc_llheader(struct ifnet *ifp, int family, char *lladdr,
     char *buf, size_t *bufsize, int *lladdr_off);
 void lltable_update_ifaddr(struct lltable *llt);
-struct llentry *lltable_alloc_entry(struct lltable *llt, u_int flags,
+struct llentry *lltable_alloc_entry(struct lltable *llt, uint16_t flags,
     const struct sockaddr *l4addr);
 void lltable_free_entry(struct lltable *llt, struct llentry *lle);
 int lltable_delete_addr(struct lltable *llt, u_int flags,
@@ -283,9 +278,9 @@ int lltable_foreach_lle(struct lltable *llt, llt_foreach_cb_t *f,
  * Generic link layer address lookup function.
  */
 static __inline struct llentry *
-lla_lookup(struct lltable *llt, u_int flags, const struct sockaddr *l3addr)
+lla_lookup(struct lltable *llt, uint16_t flags, const struct sockaddr *l3addr)
 {
-	return llt->llt_lookup(llt, flags, l3addr);
+	return __unsafe_forge_single(struct llentry *, llt->llt_lookup(llt, flags, l3addr));
 }
 
 int lla_rt_output(struct rt_msghdr *, struct rt_addrinfo *);

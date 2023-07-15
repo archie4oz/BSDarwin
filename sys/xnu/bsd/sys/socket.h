@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -74,6 +74,7 @@
 
 #include <sys/types.h>
 #include <sys/cdefs.h>
+#include <sys/constrained_ctypes.h>
 #include <machine/_param.h>
 #include <net/net_kev.h>
 
@@ -81,6 +82,11 @@
 #include <sys/param.h>
 #include <uuid/uuid.h>
 #endif /* PRIVATE */
+
+#ifdef XNU_KERNEL_PRIVATE
+#include <kern/assert.h>
+#include <kern/kalloc.h>
+#endif /* XNU_KERNEL_PRIVATE */
 
 #ifndef KERNEL
 #include <Availability.h>
@@ -134,6 +140,7 @@
 #if !defined(_POSIX_C_SOURCE) || defined(_DARWIN_C_SOURCE)
 #define SO_USELOOPBACK  0x0040          /* bypass hardware when possible */
 #define SO_LINGER       0x0080          /* linger on close if data present (in ticks) */
+#define SO_LINGER_SEC   0x1080          /* linger on close if data present (in seconds) */
 #else
 #define SO_LINGER       0x1080          /* linger on close if data present (in seconds) */
 #endif  /* (!_POSIX_C_SOURCE || _DARWIN_C_SOURCE) */
@@ -171,8 +178,8 @@
 #define SO_ERROR        0x1007          /* get error status and clear */
 #define SO_TYPE         0x1008          /* get socket type */
 #if !defined(_POSIX_C_SOURCE) || defined(_DARWIN_C_SOURCE)
-#define SO_LABEL        0x1010          /* socket's MAC label */
-#define SO_PEERLABEL    0x1011          /* socket's peer MAC label */
+#define SO_LABEL        0x1010          /* deprecated */
+#define SO_PEERLABEL    0x1011          /* deprecated */
 #ifdef __APPLE__
 #define SO_NREAD        0x1020          /* APPLE: get 1st-packet byte count */
 #define SO_NKE          0x1021          /* APPLE: Install socket-level NKE */
@@ -184,7 +191,6 @@
 #define SO_NOTIFYCONFLICT       0x1026  /* APPLE: send notification if there is a bind on a port which is already in use */
 #define SO_UPCALLCLOSEWAIT      0x1027  /* APPLE: block on close until an upcall returns */
 #endif
-#define SO_LINGER_SEC   0x1080          /* linger on close if data present (in seconds) */
 #ifdef PRIVATE
 #define SO_RESTRICTIONS 0x1081          /* APPLE: deny flag set */
 #define  SO_RESTRICT_DENY_IN    0x1     /* deny inbound (trapdoor) */
@@ -302,7 +308,7 @@
 
 #define SO_RECV_TRAFFIC_CLASS   0x1087          /* Receive traffic class (bool) */
 #define SO_TRAFFIC_CLASS_DBG    0x1088          /* Debug traffic class (struct so_tcdbg) */
-#define SO_TRAFFIC_CLASS_STATS  0x1089          /* Traffic class statistics */
+#define SO_OPTION_UNUSED_0      0x1089          /* Traffic class statistics */
 #define SO_PRIVILEGED_TRAFFIC_CLASS 0x1090      /* Privileged traffic class (bool) */
 #define SO_DEFUNCTIT    0x1091          /* Defunct a socket (only in internal builds) */
 #define SO_DEFUNCTOK    0x1100          /* can be defunct'd */
@@ -342,13 +348,35 @@
 #define SO_INTCOPROC_ALLOW              0x1118  /* Try to use internal co-processor interfaces. */
 #endif /* PRIVATE */
 
-#define SO_NETSVC_MARKING_LEVEL 0x1119  /* Get QoS marking in effect for socket */
+#define SO_NETSVC_MARKING_LEVEL    0x1119  /* Get QoS marking in effect for socket */
 
 #ifdef PRIVATE
-#define SO_NECP_LISTENUUID      0x1120  /* NECP client UUID for listener */
-#define SO_MPKL_SEND_INFO       0x1122  /* (struct so_mpkl_send_info) */
-#define SO_STATISTICS_EVENT 0x1123  /* int64 argument, an event in statistics collection */
+#define SO_NECP_LISTENUUID         0x1120  /* NECP client UUID for listener */
+#define SO_MPKL_SEND_INFO          0x1122  /* (struct so_mpkl_send_info) */
+#define SO_STATISTICS_EVENT        0x1123  /* int64 argument, an event in statistics collection */
+#define SO_WANT_KEV_SOCKET_CLOSED  0x1124  /* want delivery of KEV_SOCKET_CLOSED (int) */
+#define SO_MARK_KNOWN_TRACKER      0x1125  /* Mark as a connection to a known tracker */
+#define SO_MARK_KNOWN_TRACKER_NON_APP_INITIATED 0x1126  /* Mark tracker connection to be non-app initiated */
+#define SO_MARK_WAKE_PKT           0x1127  /* Mark next packet as a wake packet, one shot (int) */
+#define SO_RECV_WAKE_PKT           0x1128  /* Receive wake packet indication as ancillary data (int) */
+#define SO_MARK_APPROVED_APP_DOMAIN 0x1129 /* Mark connection as being for an approved associated app domain */
+#define SO_FALLBACK_MODE           0x1130  /* Indicates the mode of fallback used */
 #endif /* PRIVATE */
+
+#define SO_RESOLVER_SIGNATURE      0x1131  /* A signed data blob from the system resolver */
+#ifdef PRIVATE
+#define SO_MARK_CELLFALLBACK_UUID  0x1132  /* Mark as initiated by cell fallback using UUID of the connection */
+
+struct so_mark_cellfallback_uuid_args {
+	uuid_t flow_uuid;
+	int flow_cellfallback;
+};
+
+#endif
+
+
+/* When adding new socket-options, you need to make sure MPTCP supports these as well! */
+
 /*
  * Network Service Type for option SO_NET_SERVICE_TYPE
  *
@@ -592,7 +620,8 @@ struct so_np_extensions {
 #ifdef PRIVATE
 #define AF_MULTIPATH    39
 #endif /* PRIVATE */
-#define AF_MAX          40
+#define AF_VSOCK        40              /* VM Sockets */
+#define AF_MAX          41
 #endif  /* (!_POSIX_C_SOURCE || _DARWIN_C_SOURCE) */
 
 /*
@@ -601,7 +630,22 @@ struct so_np_extensions {
 struct sockaddr {
 	__uint8_t       sa_len;         /* total length */
 	sa_family_t     sa_family;      /* [XSI] address family */
-	char            sa_data[14];    /* [XSI] addr value (actually larger) */
+#if __has_ptrcheck
+	char            sa_data[__counted_by(sa_len - 2)];
+#else
+	char            sa_data[14];    /* [XSI] addr value (actually smaller or larger) */
+#endif
+};
+__CCT_DECLARE_CONSTRAINED_PTR_TYPES(struct sockaddr, sockaddr);
+
+/*
+ * Least amount of information that a sockaddr requires.
+ * Sockaddr_header is a compatible prefix structure of
+ * all sockaddr objects.
+ */
+struct __sockaddr_header {
+	__uint8_t           sa_len;
+	sa_family_t         sa_family;
 };
 
 #if !defined(_POSIX_C_SOURCE) || defined(_DARWIN_C_SOURCE)
@@ -638,6 +682,7 @@ struct sockaddr_storage {
 	__int64_t       __ss_align;     /* force structure storage alignment */
 	char                    __ss_pad2[_SS_PAD2SIZE];
 };
+__CCT_DECLARE_CONSTRAINED_PTR_TYPES(struct sockaddr_storage, sockaddr_storage);
 
 /*
  * Protocol families, same as address families for now.
@@ -687,6 +732,7 @@ struct sockaddr_storage {
 #ifdef PRIVATE
 #define PF_MULTIPATH    AF_MULTIPATH
 #endif /* PRIVATE */
+#define PF_VSOCK        AF_VSOCK
 #define PF_MAX          AF_MAX
 
 /*
@@ -696,7 +742,6 @@ struct sockaddr_storage {
 #define PF_BOND         ((uint32_t)0x626f6e64)  /* 'bond' */
 #ifdef KERNEL_PRIVATE
 #define PF_BRIDGE       ((uint32_t)0x62726467)  /* 'brdg' */
-#define PF_802154       ((uint32_t)0x38313534)  /* '8154' */
 #endif /* KERNEL_PRIVATE */
 
 /*
@@ -749,6 +794,7 @@ struct sockaddr_storage {
 	{ "netbios", CTLTYPE_NODE }, \
 	{ "ppp", CTLTYPE_NODE }, \
 	{ "hdrcomplete", CTLTYPE_NODE }, \
+	{ "vsock", CTLTYPE_NODE }, \
 }
 #endif /* KERNEL_PRIVATE */
 
@@ -862,6 +908,7 @@ struct user_msghdr {
 	socklen_t       msg_controllen;         /* ancillary data buffer len */
 	int             msg_flags;              /* flags on received message */
 };
+__CCT_DECLARE_CONSTRAINED_PTR_TYPES(struct user_msghdr, user_msghdr);
 
 /*
  * LP64 user version of struct msghdr.
@@ -877,6 +924,7 @@ struct user64_msghdr {
 	socklen_t       msg_controllen;         /* ancillary data buffer len */
 	int             msg_flags;              /* flags on received message */
 };
+__CCT_DECLARE_CONSTRAINED_PTR_TYPES(struct user64_msghdr, user64_msghdr);
 
 /*
  * ILP32 user version of struct msghdr.
@@ -892,6 +940,7 @@ struct user32_msghdr {
 	socklen_t       msg_controllen; /* ancillary data buffer len */
 	int             msg_flags;      /* flags on received message */
 };
+__CCT_DECLARE_CONSTRAINED_PTR_TYPES(struct user32_msghdr, user32_msghdr);
 
 /*
  * In-kernel representation of "struct msghdr_x" from
@@ -909,6 +958,8 @@ struct user_msghdr_x {
 	int             msg_flags;      /* flags on received message */
 	size_t          msg_datalen;    /* byte length of buffer in msg_iov */
 };
+__CCT_DECLARE_CONSTRAINED_PTR_TYPES(struct user_msghdr_x, user_msghdr_x);
+
 
 /*
  * LP64 user version of struct msghdr_x
@@ -925,6 +976,7 @@ struct user64_msghdr_x {
 	int             msg_flags;      /* flags on received message */
 	user64_size_t   msg_datalen;    /* byte length of buffer in msg_iov */
 };
+__CCT_DECLARE_CONSTRAINED_PTR_TYPES(struct user64_msghdr_x, user64_msghdr_x);
 
 /*
  * ILP32 user version of struct msghdr_x
@@ -941,6 +993,7 @@ struct user32_msghdr_x {
 	int             msg_flags;      /* flags on received message */
 	user32_size_t   msg_datalen;    /* byte length of buffer in msg_iov */
 };
+__CCT_DECLARE_CONSTRAINED_PTR_TYPES(struct user32_msghdr_x, user32_msghdr_x);
 
 /*
  * In-kernel representation of "struct sa_endpoints" from
@@ -1016,8 +1069,15 @@ struct user32_sa_endpoints {
 #define MSG_NBIO        0x20000         /* FIONBIO mode, used by fifofs */
 #define MSG_SKIPCFIL    0x40000         /* skip pass content filter */
 #endif
+#endif  /* (!_POSIX_C_SOURCE || _DARWIN_C_SOURCE) */
+
+#if __DARWIN_C_LEVEL >= 200809L
+#define MSG_NOSIGNAL    0x80000         /* do not generate SIGPIPE on EOF */
+#endif /* __DARWIN_C_LEVEL */
+
+#if !defined(_POSIX_C_SOURCE) || defined(_DARWIN_C_SOURCE)
 #ifdef  KERNEL
-#define MSG_USEUPCALL   0x80000000 /* Inherit upcall in sock_accept */
+#define MSG_USEUPCALL   0x80000000      /* Inherit upcall in sock_accept */
 #endif
 #endif  /* (!_POSIX_C_SOURCE || _DARWIN_C_SOURCE) */
 
@@ -1096,7 +1156,7 @@ struct cmsgcred {
 #define CMSG_LEN(l)             (__DARWIN_ALIGN32(sizeof(struct cmsghdr)) + (l))
 
 #ifdef KERNEL
-#define CMSG_ALIGN(n)   __DARWIN_ALIGN32(n)
+#define CMSG_ALIGN(n)   ((typeof(n))__DARWIN_ALIGN32(n))
 #endif
 #endif  /* (!_POSIX_C_SOURCE || _DARWIN_C_SOURCE) */
 
@@ -1108,8 +1168,6 @@ struct cmsgcred {
 #define SCM_TIMESTAMP_MONOTONIC         0x04    /* timestamp (uint64_t) */
 
 #ifdef PRIVATE
-#define SCM_SEQNUM                      0x05    /* TCP unordered recv seq no */
-#define SCM_MSG_PRIORITY                0x06    /* TCP unordered snd priority */
 #define SCM_TIMESTAMP_CONTINUOUS        0x07    /* timestamp (uint64_t) */
 #define SCM_MPKL_SEND_INFO              0x08    /* send info for multi-layer packet logging (struct so_mpkl_send_info) */
 #define SCM_MPKL_RECV_INFO              0x09    /* receive info for multi-layer packet logging (struct so_mpkl_recv_info */
@@ -1147,7 +1205,7 @@ struct omsghdr {
 #define SHUT_WR         1               /* shut down the writing side */
 #define SHUT_RDWR       2               /* shut down both sides */
 
-#if !defined(_POSIX_C_SOURCE)
+#if !defined(_POSIX_C_SOURCE) || defined(_DARWIN_C_SOURCE)
 /*
  * sendfile(2) header/trailer struct
  */
@@ -1186,7 +1244,7 @@ struct user32_sf_hdtr {
 
 #endif /* KERNEL */
 
-#endif  /* !_POSIX_C_SOURCE */
+#endif  /* (!_POSIX_C_SOURCE || _DARWIN_C_SOURCE) */
 
 #ifdef PRIVATE
 #if !defined(_POSIX_C_SOURCE) || defined(_DARWIN_C_SOURCE)
@@ -1294,10 +1352,11 @@ struct so_cinforeq64 {
 #define CIF_MP_READY            0x200   /* multipath protocol confirmed */
 #define CIF_MP_DEGRADED         0x400   /* has lost its multipath capability */
 #define CIF_MP_ACTIVE           0x800   /* this is the active subflow */
+#define CIF_MP_V1               0x1000  /* MPTCP v1 is used */
 
 /* valid connection info auxiliary data types */
 #define CIAUX_TCP       0x1     /* TCP auxiliary data (conninfo_tcp_t) */
-#define CIAUX_MPTCP     0x2     /* MPTCP auxiliary data (conninfo_mptcp_t) */
+#define CIAUX_MPTCP     0x2     /* MPTCP auxiliary data (conninfo_multipathtcp) */
 
 /*
  * Structure for SIOC{S,G}CONNORDER
@@ -1322,6 +1381,14 @@ struct netpolicy_event_data {
 struct kev_netpolicy_ifdenied {
 	struct netpolicy_event_data     ev_data;
 	__uint32_t ev_if_functional_type;
+};
+
+/*
+ * KEV_NETPOLICY_NETDENIED event structure
+ */
+struct kev_netpolicy_netdenied {
+	struct netpolicy_event_data     ev_data;
+	__uint32_t ev_network_type;
 };
 
 /*

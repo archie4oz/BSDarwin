@@ -29,6 +29,12 @@
 #ifndef _CRYPTO_SHA1_H_
 #define _CRYPTO_SHA1_H_
 
+#if KERNEL
+#include <sys/types.h>
+#else /* !KERNEL */
+#include <machine/types.h>
+#endif /* KERNEL */
+
 #ifdef  __cplusplus
 extern "C" {
 #endif
@@ -60,9 +66,6 @@ typedef struct sha1_ctxt {
 
 extern void SHA1Init(SHA1_CTX *);
 extern void SHA1Update(SHA1_CTX *, const void *, size_t);
-#ifdef XNU_KERNEL_PRIVATE
-extern void SHA1UpdateUsePhysicalAddress(SHA1_CTX *, const void *, size_t);
-#endif
 extern void SHA1Final(void *, SHA1_CTX *);
 
 #ifdef  __cplusplus
